@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT n.id AS \"id!\", n.name, n.network_id, n.profile, n.origin, n.cidr,\n                      n.created_at AS \"created_at: DateTime<Utc>\"\n               FROM networks n JOIN workload_networks wn ON wn.network_id = n.id\n               WHERE wn.workload_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "network_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cidr",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "6c571820d9c36e79be944579d46a3975be10166b223446e5d3141b5ce59c5309"
+}

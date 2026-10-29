@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workloads (name, env, seq, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "da7e59b8099fa0d5a33f9a3aecbf59041db26e40eca79c20fb3455910977d91c"
+}

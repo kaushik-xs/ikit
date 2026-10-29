@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE registry_services SET updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bcf54eb1d4bfcca48add4a06da3bbbc89fd86f14f15f0b6765525ab98ede15a6"
+}

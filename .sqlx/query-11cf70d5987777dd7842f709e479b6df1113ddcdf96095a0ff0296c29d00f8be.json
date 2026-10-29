@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO hook_runs (hook_id, run_id, script, checksum, result, error, ran_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "11cf70d5987777dd7842f709e479b6df1113ddcdf96095a0ff0296c29d00f8be"
+}

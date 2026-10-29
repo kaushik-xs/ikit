@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", name, network_id, profile, origin, cidr,\n                      created_at AS \"created_at: DateTime<Utc>\"\n               FROM networks WHERE name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "network_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cidr",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "66eaacf7c2ba4ab0b25a662acf063565cc7f7814f3fbe972a6896fb0bc162c28"
+}

@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO profiles (kind, name, config_json, secret_keys_json, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", kind, name,\n                         config_json AS \"config_json: Json<BTreeMap<String, String>>\",\n                         secret_keys_json AS \"secret_keys_json: Json<Vec<String>>\",\n                         created_at AS \"created_at: DateTime<Utc>\",\n                         updated_at AS \"updated_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "config_json: Json<BTreeMap<String, String>>",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "secret_keys_json: Json<Vec<String>>",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3b90da0436ca94b1e67187e3d18385cd238b7ae924e87f48116e260ea6ba81b4"
+}

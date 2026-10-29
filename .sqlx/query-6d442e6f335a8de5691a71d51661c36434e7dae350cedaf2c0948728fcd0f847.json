@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO hooks (workload_id, name, kind, phase, service, engine, database, source, spec_json,\n                                  fail_on_error, ord, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,\n                       (SELECT COALESCE(MAX(ord), 0) + 1 FROM hooks WHERE workload_id = ?), ?, ?)\n               RETURNING id AS \"id!\", name, kind, phase, service, engine, database, source, spec_json,\n                         fail_on_error AS \"fail_on_error: bool\", ord AS \"ord!\",\n                         created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "phase",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "service",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "engine",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "database",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "spec_json",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "fail_on_error: bool",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "ord!",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6d442e6f335a8de5691a71d51661c36434e7dae350cedaf2c0948728fcd0f847"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM services WHERE workload_id = ? AND name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "33e2cfa71a485e704581b6686163b109284626b8faef6eb0336a9ba7f8359fef"
+}

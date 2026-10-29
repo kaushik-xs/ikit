@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", action, actor, result, error, plan_json,\n                      started_at AS \"started_at: DateTime<Utc>\", finished_at AS \"finished_at: DateTime<Utc>\"\n               FROM runs WHERE workload_id = ? ORDER BY id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "action",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "result",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "error",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_json",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "started_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "finished_at: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "598d359614948a3536678a5085704f4ceb3572a93fcbb1058b7ec5018861c31c"
+}

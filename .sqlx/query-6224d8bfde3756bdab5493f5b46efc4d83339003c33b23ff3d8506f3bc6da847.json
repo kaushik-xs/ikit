@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO targets (name, kind, origin, connection_json, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", name, kind, origin,\n                         connection_json AS \"connection_json: Json<Connection>\", status,\n                         last_checked_at AS \"last_checked_at: DateTime<Utc>\",\n                         last_check_json AS \"last_check_json: Json<Vec<Check>>\",\n                         created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "connection_json: Json<Connection>",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_checked_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_check_json: Json<Vec<Check>>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6224d8bfde3756bdab5493f5b46efc4d83339003c33b23ff3d8506f3bc6da847"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs SET result = ?, error = ?, finished_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "be5cce1871d2d781f98268668e43eef205b9c81c7bf6e0fa5de11c4b9a4099ca"
+}

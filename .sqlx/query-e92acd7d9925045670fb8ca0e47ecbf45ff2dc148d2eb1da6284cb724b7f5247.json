@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", workload, service, engine, storage, object_key, size, sha256,\n                      created_at AS \"created_at: DateTime<Utc>\"\n               FROM backups\n               WHERE (?1 IS NULL OR workload = ?1) AND (?2 IS NULL OR service = ?2)\n               ORDER BY id DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "workload",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "service",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "engine",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "storage",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "object_key",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "size",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sha256",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e92acd7d9925045670fb8ca0e47ecbf45ff2dc148d2eb1da6284cb724b7f5247"
+}

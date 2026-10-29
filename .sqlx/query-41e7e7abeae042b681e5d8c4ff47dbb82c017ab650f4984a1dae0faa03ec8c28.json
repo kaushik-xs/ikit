@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO registry_services\n               (name, display_name, description, category, tags_json, owner, homepage, source, created_at, updated_at)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n           RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "41e7e7abeae042b681e5d8c4ff47dbb82c017ab650f4984a1dae0faa03ec8c28"
+}

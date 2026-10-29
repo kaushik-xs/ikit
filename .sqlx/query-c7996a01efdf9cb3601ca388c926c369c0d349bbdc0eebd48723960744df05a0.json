@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE registry_versions SET deprecated = ?\n             WHERE version = ? AND service_id = (SELECT id FROM registry_services WHERE name = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c7996a01efdf9cb3601ca388c926c369c0d349bbdc0eebd48723960744df05a0"
+}

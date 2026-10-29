@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT wn.network_id AS \"network_id!\", w.name\n               FROM workload_networks wn JOIN workloads w ON w.id = wn.workload_id\n               ORDER BY w.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "network_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "9b76a042cbf23e2e8b42c4ffd25220c3ae22feaca0b0163523a2f6487b9d8029"
+}

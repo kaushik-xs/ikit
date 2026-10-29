@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kaushik-xs/ikit"
+
+[workspace.dependencies]
+rmcp = { version = "3.8", default-features = false }
+ikit-core = { path = "crates/ikit-core" }
+ikit-state = { path = "crates/ikit-state" }
+ikit-app = { path = "crates/ikit-app" }
+ikit-provider = { path = "crates/ikit-provider" }
+ikit-mcp = { path = "crates/ikit-mcp" }
+ikit-net = { path = "crates/ikit-net" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+comfy-table = "7"
+dirs = "6"
+inquire = "0.7"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+semver = { version = "1", features = ["serde"] }
+object_store = { version = "0.12", features = ["aws", "azure", "gcp"] }
+futures = "0.3"
+getrandom = "0.3"
+zstd = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+serde_json = "1"
+serde_yaml_ng = "0.10"
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio", "tls-rustls", "macros", "migrate", "sqlite", "json", "chrono",
+] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

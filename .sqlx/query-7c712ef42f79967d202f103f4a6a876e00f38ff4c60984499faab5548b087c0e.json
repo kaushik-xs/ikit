@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT host AS \"host!\", username, created_at AS \"created_at: DateTime<Utc>\"\n               FROM registry_logins ORDER BY host",
+  "describe": {
+    "columns": [
+      {
+        "name": "host!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "username",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7c712ef42f79967d202f103f4a6a876e00f38ff4c60984499faab5548b087c0e"
+}

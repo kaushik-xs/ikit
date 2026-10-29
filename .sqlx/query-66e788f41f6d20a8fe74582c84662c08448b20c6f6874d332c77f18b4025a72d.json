@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT v.id AS \"id!\" FROM registry_versions v\n               JOIN registry_services s ON s.id = v.service_id\n               WHERE s.name = ? AND v.version = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "66e788f41f6d20a8fe74582c84662c08448b20c6f6874d332c77f18b4025a72d"
+}

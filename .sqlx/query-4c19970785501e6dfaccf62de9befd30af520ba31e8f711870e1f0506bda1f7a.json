@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM hooks WHERE workload_id = ? AND name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4c19970785501e6dfaccf62de9befd30af520ba31e8f711870e1f0506bda1f7a"
+}

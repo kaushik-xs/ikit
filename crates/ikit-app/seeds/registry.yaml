@@ -1,0 +1,79 @@
+# Built-in registry seeds, imported by `ikit init` with source `seed`.
+# Only missing services and versions are added; entries you have edited are never overwritten.
+services:
+  - name: postgres
+    display_name: PostgreSQL
+    description: Relational database
+    category: data
+    tags: [sql, database]
+    homepage: https://www.postgresql.org
+    versions:
+      - version: "16.6"
+        image: postgres:16.6
+        ports: [{container: 5432, name: postgres}]
+        env:
+          - {name: POSTGRES_USER, default: postgres}
+          - {name: POSTGRES_PASSWORD, required: true, secret: true, description: Superuser password}
+          - {name: POSTGRES_DB, default: app}
+        volumes: [{name: data, path: /var/lib/postgresql/data}]
+        healthcheck: {command: [pg_isready, -U, postgres], interval: 10s, timeout: 5s, retries: 5}
+      - version: "17.2"
+        image: postgres:17.2
+        ports: [{container: 5432, name: postgres}]
+        env:
+          - {name: POSTGRES_USER, default: postgres}
+          - {name: POSTGRES_PASSWORD, required: true, secret: true, description: Superuser password}
+          - {name: POSTGRES_DB, default: app}
+        volumes: [{name: data, path: /var/lib/postgresql/data}]
+        healthcheck: {command: [pg_isready, -U, postgres], interval: 10s, timeout: 5s, retries: 5}
+
+  - name: mysql
+    display_name: MySQL
+    description: Relational database
+    category: data
+    tags: [sql, database]
+    homepage: https://www.mysql.com
+    versions:
+      - version: "8.4.3"
+        image: mysql:8.4.3
+        ports: [{container: 3306, name: mysql}]
+        env:
+          - {name: MYSQL_ROOT_PASSWORD, required: true, secret: true, description: Root password}
+          - {name: MYSQL_DATABASE, default: app}
+        volumes: [{name: data, path: /var/lib/mysql}]
+        healthcheck: {command: [mysqladmin, ping, -h, localhost], interval: 10s, timeout: 5s, retries: 5}
+
+  - name: redis
+    display_name: Redis
+    description: In-memory key-value store
+    category: data
+    tags: [cache, kv]
+    homepage: https://redis.io
+    versions:
+      - version: "7.4.1"
+        image: redis:7.4.1
+        ports: [{container: 6379, name: redis}]
+        volumes: [{name: data, path: /data}]
+        healthcheck: {command: [redis-cli, ping], interval: 10s, timeout: 3s, retries: 5}
+
+  - name: nginx
+    display_name: NGINX
+    description: Web server and reverse proxy
+    category: platform
+    tags: [http, proxy]
+    homepage: https://nginx.org
+    versions:
+      - version: "1.27.3"
+        image: nginx:1.27.3
+        ports: [{container: 80, name: http}]
+
+  - name: traefik
+    display_name: Traefik
+    description: Reverse proxy and ingress
+    category: platform
+    tags: [http, proxy, ingress]
+    homepage: https://traefik.io
+    versions:
+      - version: "3.2.3"
+        image: traefik:v3.2.3
+        ports: [{container: 80, name: http}, {container: 8080, name: dashboard}]

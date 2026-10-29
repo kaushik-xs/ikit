@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO services\n                     (workload_id, group_id, name, registry_service_id, registry_version_id, version_constraint,\n                      env_json, secret_env_json, created_at, updated_at)\n                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "30dd7360733acf831d7055d8dc8428f282db9e607692da5f2489b2180e296d15"
+}

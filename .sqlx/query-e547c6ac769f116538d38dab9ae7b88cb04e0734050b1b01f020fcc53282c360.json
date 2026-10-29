@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO service_groups (workload_id, kind, created_at) VALUES (?, ?, ?)\n                   ON CONFLICT (workload_id, kind) DO UPDATE SET kind = excluded.kind\n                   RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e547c6ac769f116538d38dab9ae7b88cb04e0734050b1b01f020fcc53282c360"
+}

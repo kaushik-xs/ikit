@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT w.id AS \"id!\", w.name, w.env, w.seq, t.name AS \"target!\", t.kind AS \"target_kind!\", w.status,\n                      w.created_at AS \"created_at: DateTime<Utc>\", w.updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM workloads w JOIN targets t ON t.id = w.target_id\n               WHERE ?1 IS NULL OR w.env = ?1\n               ORDER BY w.env, w.seq",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "env",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "seq",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "target!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_kind!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c6d93989d0f8d9543aa9131ef8fd6f8fbad29423fe8c94a4e521b02f20b55d6e"
+}

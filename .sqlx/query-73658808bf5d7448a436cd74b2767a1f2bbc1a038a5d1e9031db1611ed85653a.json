@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO locks (workload_id, holder, acquired_at) VALUES (?, ?, ?)\n               ON CONFLICT (workload_id) DO UPDATE SET holder = excluded.holder, acquired_at = excluded.acquired_at\n               WHERE locks.acquired_at < ? OR locks.holder = excluded.holder\n               RETURNING holder AS \"holder!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "holder!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "73658808bf5d7448a436cd74b2767a1f2bbc1a038a5d1e9031db1611ed85653a"
+}

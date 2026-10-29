@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE registry_versions SET image = ?, digest = ?, spec_json = ?, release_notes = ?, deprecated = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "665355ca9a6bc94a850fd7e40ea80df41e237f53592250f0e4feb29e1235b0a3"
+}

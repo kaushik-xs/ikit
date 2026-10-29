@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM service_groups\n             WHERE workload_id = ? AND NOT EXISTS (SELECT 1 FROM services WHERE group_id = service_groups.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "318de54fe3a3a3b04e260139c1ec72a01cec6eab9d7ef508b656fc8878dc1c5d"
+}

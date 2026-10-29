@@ -1,0 +1,104 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!\", s.name, g.kind AS \"group_kind!\", r.name AS \"registry_service!\",\n                      s.version_constraint, v.id AS \"version_id!\", v.version AS \"version!\", v.image AS \"image!\",\n                      v.digest,\n                      v.deprecated AS \"deprecated!: bool\",\n                      s.env_json AS \"env_json: Json<BTreeMap<String, String>>\",\n                      s.secret_env_json AS \"secret_env_json: Json<Vec<String>>\",\n                      s.publish_json AS \"publish_json: Json<Vec<PublishedPort>>\",\n                      s.created_at AS \"created_at: DateTime<Utc>\", s.updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM services s\n               JOIN service_groups g ON g.id = s.group_id\n               JOIN registry_services r ON r.id = s.registry_service_id\n               JOIN registry_versions v ON v.id = s.registry_version_id\n               WHERE s.workload_id = ?\n               ORDER BY CASE g.kind WHEN 'app' THEN 0 WHEN 'platform' THEN 1 ELSE 2 END, s.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "group_kind!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "registry_service!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "version_constraint",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "version_id!",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "version!",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "image!",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "digest",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "deprecated!: bool",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "env_json: Json<BTreeMap<String, String>>",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "secret_env_json: Json<Vec<String>>",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "publish_json: Json<Vec<PublishedPort>>",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 14,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e89142d411e952749e48345cbc3ffb0168f9b128ec004e136135d5e94410ca43"
+}

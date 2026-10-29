@@ -1,0 +1,14 @@
+pub mod backup;
+pub mod deploy;
+pub mod group;
+pub mod hook;
+pub mod init;
+pub mod mcp;
+pub mod net;
+pub mod org;
+pub mod profile;
+pub mod registry;
+pub mod service;
+pub mod storage;
+pub mod target;
+pub mod workload;

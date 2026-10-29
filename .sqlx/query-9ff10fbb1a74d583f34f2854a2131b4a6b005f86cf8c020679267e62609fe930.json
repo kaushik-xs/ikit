@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM profiles WHERE kind = ? AND name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9ff10fbb1a74d583f34f2854a2131b4a6b005f86cf8c020679267e62609fe930"
+}

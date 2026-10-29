@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM storages WHERE name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "394d86f6f3eaba19f54b2239e0ea9a88f6851ee3fe8d5fb10cfec5f304d45fa4"
+}

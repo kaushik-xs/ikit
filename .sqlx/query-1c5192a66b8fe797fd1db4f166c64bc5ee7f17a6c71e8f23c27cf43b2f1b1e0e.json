@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE services\n             SET registry_version_id = ?, version_constraint = ?, env_json = ?, secret_env_json = ?,\n                 publish_json = ?, updated_at = ?\n             WHERE workload_id = ? AND name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "1c5192a66b8fe797fd1db4f166c64bc5ee7f17a6c71e8f23c27cf43b2f1b1e0e"
+}

@@ -1,0 +1,23 @@
+[package]
+name = "ikit-mcp"
+description = "ikit MCP server: exposes ikit tools to AI agents over stdio or HTTP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ikit-app.workspace = true
+ikit-core.workspace = true
+ikit-net.workspace = true
+axum.workspace = true
+rmcp = { workspace = true, default-features = true, features = [
+  "server", "transport-io", "macros", "transport-streamable-http-server",
+] }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["net", "signal"] }
+tracing.workspace = true

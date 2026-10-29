@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM locks WHERE workload_id = ? AND holder = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "939342eede53b76e74fb39a5eb1addafab45acb3312b9bfa1a975743c6930ae9"
+}

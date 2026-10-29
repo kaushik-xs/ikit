@@ -1,0 +1,35 @@
+[package]
+name = "ikit-cli"
+description = "ikit: create, update, destroy and manage infrastructure components"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ikit"
+path = "src/main.rs"
+
+[dependencies]
+ikit-core.workspace = true
+ikit-app.workspace = true
+ikit-provider.workspace = true
+ikit-mcp.workspace = true
+ikit-net.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+inquire.workspace = true
+serde.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

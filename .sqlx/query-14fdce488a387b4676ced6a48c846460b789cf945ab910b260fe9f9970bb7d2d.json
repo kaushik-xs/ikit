@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM services WHERE registry_service_id = ?) AS \"used!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "used!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "14fdce488a387b4676ced6a48c846460b789cf945ab910b260fe9f9970bb7d2d"
+}

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT w.name AS \"workload!\", s.name AS \"service!\", v.version AS \"version!\"\n               FROM services s\n               JOIN workloads w ON w.id = s.workload_id\n               JOIN registry_services r ON r.id = s.registry_service_id\n               JOIN registry_versions v ON v.id = s.registry_version_id\n               WHERE r.name = ?\n               ORDER BY w.name, s.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "workload!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "service!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "version!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "67efeade6c422a2b3edaee7701d16bb655a32a49f0215b3da38bed14920ea972"
+}

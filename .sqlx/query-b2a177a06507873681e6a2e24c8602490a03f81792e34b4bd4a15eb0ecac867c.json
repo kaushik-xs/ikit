@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM workload_networks WHERE workload_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b2a177a06507873681e6a2e24c8602490a03f81792e34b4bd4a15eb0ecac867c"
+}

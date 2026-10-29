@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE targets SET status = ?, last_check_json = ?, last_checked_at = ?, updated_at = ? WHERE name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ef4a1259e29ca78fd5f18bc57c87b04d1cc41494a7cfb608dfbe98cd48835de2"
+}

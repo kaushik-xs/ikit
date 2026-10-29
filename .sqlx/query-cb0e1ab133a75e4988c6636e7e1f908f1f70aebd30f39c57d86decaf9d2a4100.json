@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT v.id AS \"id!\", v.service_id, v.version, v.image, v.digest,\n                  v.spec_json AS \"spec_json: Json<ServiceSpec>\", v.release_notes,\n                  v.deprecated AS \"deprecated: bool\", v.created_at AS \"created_at: DateTime<Utc>\"\n           FROM registry_versions v JOIN registry_services s ON s.id = v.service_id\n           WHERE ?1 IS NULL OR s.name = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "service_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "version",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "image",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "digest",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "spec_json: Json<ServiceSpec>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "release_notes",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "deprecated: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "cb0e1ab133a75e4988c6636e7e1f908f1f70aebd30f39c57d86decaf9d2a4100"
+}

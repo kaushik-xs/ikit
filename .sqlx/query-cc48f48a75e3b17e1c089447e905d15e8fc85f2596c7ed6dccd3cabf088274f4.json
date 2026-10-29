@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO storages (name, provider, bucket, prefix, profile, options_json, created_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", name, provider, bucket, prefix, profile,\n                         options_json AS \"options_json: Json<StorageOptions>\", created_at AS \"created_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "provider",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "bucket",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "prefix",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "options_json: Json<StorageOptions>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "cc48f48a75e3b17e1c089447e905d15e8fc85f2596c7ed6dccd3cabf088274f4"
+}

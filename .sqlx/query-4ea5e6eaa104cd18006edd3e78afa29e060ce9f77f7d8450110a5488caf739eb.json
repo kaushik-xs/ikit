@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO env_counters (env, next_seq) VALUES (?, 2)\n               ON CONFLICT (env) DO UPDATE SET next_seq = next_seq + 1\n               RETURNING next_seq - 1 AS \"seq!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4ea5e6eaa104cd18006edd3e78afa29e060ce9f77f7d8450110a5488caf739eb"
+}

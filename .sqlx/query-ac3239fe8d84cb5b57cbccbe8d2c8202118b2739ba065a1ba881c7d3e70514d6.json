@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT h.name AS \"hook!\", r.script, r.checksum, r.result, r.error,\n                      r.ran_at AS \"ran_at: DateTime<Utc>\"\n               FROM hook_runs r JOIN hooks h ON h.id = r.hook_id\n               WHERE h.workload_id = ?1 AND (?2 IS NULL OR h.name = ?2)\n               ORDER BY r.id DESC LIMIT ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "hook!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "script",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "checksum",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "result",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "error",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "ran_at: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ac3239fe8d84cb5b57cbccbe8d2c8202118b2739ba065a1ba881c7d3e70514d6"
+}

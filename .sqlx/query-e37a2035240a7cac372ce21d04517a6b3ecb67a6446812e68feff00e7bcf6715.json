@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO networks (name, network_id, profile, origin, cidr, created_at)\n               VALUES (?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", name, network_id, profile, origin, cidr,\n                         created_at AS \"created_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "network_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cidr",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "e37a2035240a7cac372ce21d04517a6b3ecb67a6446812e68feff00e7bcf6715"
+}

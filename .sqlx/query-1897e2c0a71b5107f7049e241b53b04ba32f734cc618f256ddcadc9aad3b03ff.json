@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM registry_versions WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1897e2c0a71b5107f7049e241b53b04ba32f734cc618f256ddcadc9aad3b03ff"
+}
