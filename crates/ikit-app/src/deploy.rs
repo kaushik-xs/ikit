@@ -203,7 +203,7 @@ impl App {
         }
     }
 
-    async fn ssh(
+    pub(crate) async fn ssh(
         &self,
         args: &[String],
         script: &str,
@@ -390,11 +390,17 @@ impl App {
         let zerotier = self.zt_sidecar_network(workload).await?.map(|n| ZtSidecar {
             network_id: n.network_id,
         });
+        let external_networks = self
+            .store
+            .networks()
+            .docker_networks(detail.workload.id)
+            .await?;
         let input = WorkloadInput {
             org: self.org.name.clone(),
             workload: workload.to_owned(),
             services,
             zerotier,
+            external_networks,
         };
         compose::render(&input).map_err(|e| AppError::Invalid(e.to_string()))
     }
@@ -432,6 +438,8 @@ impl App {
                 unpinned.join(", ")
             ));
         }
+        blockers.extend(self.port_clashes(&wl).await?);
+        blockers.extend(self.docker_network_blockers(&wl, &place).await?);
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -441,6 +449,51 @@ impl App {
             blockers,
             rendered,
         })
+    }
+
+    /// Host ports `wl` publishes that another workload on its target, one that may have
+    /// containers there (not a draft), already publishes. Only this org's workloads are
+    /// known; ports used by anything else on the host still fail at `docker compose up`.
+    async fn port_clashes(&self, wl: &Workload) -> Result<Vec<String>> {
+        let mine = self.store.workloads().services(wl.id).await?;
+        if mine.iter().all(|s| s.publish.is_empty()) {
+            return Ok(vec![]);
+        }
+        let mut clashes = Vec::new();
+        for other in self.workload_list(None).await? {
+            if other.name == wl.name
+                || other.target != wl.target
+                || other.status == WorkloadStatus::Draft
+            {
+                continue;
+            }
+            let theirs = self.store.workloads().services(other.id).await?;
+            for s in &mine {
+                for p in &s.publish {
+                    let Some((t, q)) = theirs
+                        .iter()
+                        .find_map(|t| t.publish.iter().find(|q| p.clashes(q)).map(|q| (t, q)))
+                    else {
+                        continue;
+                    };
+                    clashes.push(format!(
+                        "`{}` publishes {p}, but host port {} on `{}` is already published by `{}` of {} ({q}); \
+                         move it with `ikit svc publish {} <port>:{} --remove {} --wl {}`, or free it in {}",
+                        s.name,
+                        p.host,
+                        wl.target,
+                        t.name,
+                        other.name,
+                        s.name,
+                        p.container,
+                        p.host,
+                        wl.name,
+                        other.name,
+                    ));
+                }
+            }
+        }
+        Ok(clashes)
     }
 
     pub(crate) async fn lock(&self, wl: &Workload, holder: &str) -> Result<()> {
@@ -1625,6 +1678,74 @@ mod tests {
         .unwrap();
         let err = app.backup_restore(latest.id, "test").await.unwrap_err();
         assert!(err.to_string().contains("checksum"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn host_ports_cannot_clash_with_deployed_workloads_on_the_target() {
+        let (_dir, app, _) = app().await;
+        let app = app.with_exec(Arc::new(FakeDocker::default()));
+        for t in ["box", "edge"] {
+            app.target_attach(t, Connection::Local).await.unwrap();
+        }
+        let nginx = || ServiceRequest {
+            name: None,
+            registry: "nginx".into(),
+            constraint: "*".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        let (a, b, c) = ("wl-acme-dev-001", "wl-acme-dev-002", "wl-acme-dev-003");
+        for (wl, target) in [(a, "box"), (b, "box"), (c, "edge")] {
+            app.workload_create("dev", target).await.unwrap();
+            app.services_add(wl, vec![nginx()]).await.unwrap();
+            app.service_publish(wl, "nginx", vec!["8080:80".parse().unwrap()], &[])
+                .await
+                .unwrap();
+        }
+
+        // A draft on the same target has no containers yet, so nothing clashes.
+        assert!(app.deploy_plan(b).await.unwrap().blockers.is_empty());
+
+        let id = app.workload_get(a).await.unwrap().id;
+        app.store
+            .workloads()
+            .set_status(id, WorkloadStatus::Applied)
+            .await
+            .unwrap();
+        let plan = app.deploy_plan(b).await.unwrap();
+        assert_eq!(plan.blockers.len(), 1, "{:?}", plan.blockers);
+        assert!(
+            plan.blockers[0].contains("host port 8080 on `box`")
+                && plan.blockers[0].contains(a)
+                && plan.blockers[0].contains("--remove 8080 --wl wl-acme-dev-002"),
+            "{}",
+            plan.blockers[0]
+        );
+        let e = app.deploy_apply(&plan, "test", false).await.unwrap_err();
+        assert!(e.to_string().contains("host port 8080"), "{e}");
+        assert!(
+            app.deploy_plan(c).await.unwrap().blockers.is_empty(),
+            "other targets are not affected"
+        );
+
+        // Different addresses do not clash; a new host port clears it.
+        app.service_publish(
+            a,
+            "nginx",
+            vec!["127.0.0.1:8080:80".parse().unwrap()],
+            &[8080],
+        )
+        .await
+        .unwrap();
+        app.service_publish(
+            b,
+            "nginx",
+            vec!["10.0.0.5:8080:80".parse().unwrap()],
+            &[8080],
+        )
+        .await
+        .unwrap();
+        assert!(app.deploy_plan(b).await.unwrap().blockers.is_empty());
     }
 
     #[tokio::test]

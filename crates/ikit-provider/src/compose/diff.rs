@@ -137,6 +137,7 @@ fn service_details(
     for field in [
         "command",
         "network_mode",
+        "networks",
         "cap_add",
         "devices",
         "ports",

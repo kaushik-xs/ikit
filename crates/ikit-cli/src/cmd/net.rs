@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use ikit_core::Network;
+use ikit_core::{Category, DockerNetwork, Network};
 
 use crate::Ctx;
 use crate::output::{Output, print_json, table};
@@ -9,6 +9,29 @@ pub enum NetCmd {
     /// ZeroTier networks: create, join, authorize members, link to workloads.
     #[command(subcommand)]
     Zt(ZtCmd),
+    /// Docker networks outside the selected workload (or --wl) that a group joins.
+    #[command(subcommand)]
+    Docker(DockerCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DockerCmd {
+    /// Have a group join an existing Docker network (`external: true`) from the next apply.
+    /// Its services also get a `<workload>-<service>` alias there.
+    Attach {
+        name: String,
+        /// The service group that joins it.
+        #[arg(long)]
+        group: Category,
+    },
+    /// Stop a group (or, without --group, every group) joining a Docker network.
+    Detach {
+        name: String,
+        #[arg(long)]
+        group: Option<Category>,
+    },
+    #[command(alias = "ls")]
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -111,7 +134,10 @@ pub enum ZtCmd {
 }
 
 pub async fn run(ctx: &Ctx, cmd: NetCmd) -> anyhow::Result<()> {
-    let NetCmd::Zt(cmd) = cmd;
+    let cmd = match cmd {
+        NetCmd::Zt(cmd) => cmd,
+        NetCmd::Docker(cmd) => return run_docker(ctx, cmd).await,
+    };
     let app = ctx.app().await?;
     let selected_wl = || app.resolve_workload_name(ctx.wl.as_deref());
     match cmd {
@@ -443,6 +469,52 @@ fn members_table(members: &[ikit_net::Member]) {
             m.ips.join(", "),
             m.client_version.clone(),
         ]);
+    }
+    println!("{t}");
+}
+
+async fn run_docker(ctx: &Ctx, cmd: DockerCmd) -> anyhow::Result<()> {
+    let app = ctx.app().await?;
+    let wl = app.resolve_workload_name(ctx.wl.as_deref())?;
+    let attached = match &cmd {
+        DockerCmd::Attach { name, group } => app.docker_network_attach(&wl, name, *group).await?,
+        DockerCmd::Detach { name, group } => app.docker_network_detach(&wl, name, *group).await?,
+        DockerCmd::List => app.docker_networks(&wl).await?,
+    };
+    if ctx.output == Output::Json {
+        return print_json(&attached);
+    }
+    match cmd {
+        DockerCmd::Attach { name, group } => println!(
+            "The {group} group of {wl} joins `{name}` from the next `ikit apply`; \
+             `ikit plan` checks that it exists on the target."
+        ),
+        DockerCmd::Detach { name, .. } => {
+            println!("Detached `{name}`; the next `ikit apply` takes effect.")
+        }
+        DockerCmd::List => print_docker_networks(&wl, &attached),
+    }
+    Ok(())
+}
+
+fn print_docker_networks(wl: &str, attached: &[DockerNetwork]) {
+    if attached.is_empty() {
+        println!(
+            "{wl} joins no external Docker networks. Attach one with \
+             `ikit net docker attach <network> --group <app|platform|data>`."
+        );
+        return;
+    }
+    let mut t = table(&["NETWORK", "GROUPS"]);
+    let mut by_name: Vec<(&str, Vec<String>)> = Vec::new();
+    for n in attached {
+        match by_name.last_mut() {
+            Some((name, groups)) if *name == n.name => groups.push(n.group.to_string()),
+            _ => by_name.push((&n.name, vec![n.group.to_string()])),
+        }
+    }
+    for (name, groups) in by_name {
+        t.add_row(vec![name.to_owned(), groups.join(", ")]);
     }
     println!("{t}");
 }

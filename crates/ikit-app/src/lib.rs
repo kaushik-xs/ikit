@@ -10,6 +10,7 @@ use ikit_state::{SqliteStore, StateError, StateStore};
 mod backup;
 mod context;
 mod deploy;
+mod docker_networks;
 mod drift;
 pub mod exec;
 mod hooks;

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT network, group_kind FROM workload_docker_networks\n               WHERE workload_id = ? ORDER BY network, group_kind",
+  "describe": {
+    "columns": [
+      {
+        "name": "network",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "group_kind",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4d37a3350b277474934175fbb960f1a95d40bc5ea26788ba7a983d2e47726cc6"
+}

@@ -55,7 +55,7 @@ pub use hook::{
     Hook, HookAction, HookKind, HookPhase, HookRunRecord, HttpAction, McpAction, ScriptState,
     ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia,
 };
-pub use network::{Network, NetworkOrigin};
+pub use network::{DockerNetwork, Network, NetworkOrigin, is_docker_network_name};
 pub use profile::{FieldSpec, Profile, ProfileError, ProfileKind, ProfileValues, Requirement};
 pub use registry::{
     Category, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM workload_docker_networks\n               WHERE workload_id = ? AND network = ? AND (? IS NULL OR group_kind = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b836a17bc888bbe31c80a5cf2e29597c5cccd1dd819e45c1da0ee2280597d948"
+}

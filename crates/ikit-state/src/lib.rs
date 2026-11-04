@@ -10,10 +10,10 @@ use ikit_core::registry::{
 };
 use ikit_core::target::{Check, TargetOrigin};
 use ikit_core::{
-    Backup, Category, Connection, Hook, HookAction, HookPhase, HookRunRecord, Network,
-    NetworkOrigin, Profile, ProfileKind, PublishedPort, RegistryEntry, RegistryVersion, Run,
-    RunAction, RunResult, ServiceInstance, SqlEngine, Storage, StorageOptions, StorageProvider,
-    Target, TargetStatus, VersionConstraint, Workload, WorkloadStatus,
+    Backup, Category, Connection, DockerNetwork, Hook, HookAction, HookPhase, HookRunRecord,
+    Network, NetworkOrigin, Profile, ProfileKind, PublishedPort, RegistryEntry, RegistryVersion,
+    Run, RunAction, RunResult, ServiceInstance, SqlEngine, Storage, StorageOptions,
+    StorageProvider, Target, TargetStatus, VersionConstraint, Workload, WorkloadStatus,
 };
 use semver::Version;
 
@@ -201,6 +201,20 @@ pub trait NetworkRepo: Send + Sync {
     /// Returns whether the workload was linked.
     async fn unlink(&self, workload_id: i64) -> Result<bool>;
     async fn for_workload(&self, workload_id: i64) -> Result<Option<Network>>;
+    /// Has a workload's group join an external Docker network. Returns false if it
+    /// already did.
+    async fn attach_docker(&self, workload_id: i64, network: &str, group: Category)
+    -> Result<bool>;
+    /// Detaches a Docker network from one group, or from all of them with `None`.
+    /// Returns how many attachments were removed.
+    async fn detach_docker(
+        &self,
+        workload_id: i64,
+        network: &str,
+        group: Option<Category>,
+    ) -> Result<u64>;
+    /// A workload's external Docker networks, by name then group.
+    async fn docker_networks(&self, workload_id: i64) -> Result<Vec<DockerNetwork>>;
 }
 
 #[derive(Debug, Clone, Copy)]

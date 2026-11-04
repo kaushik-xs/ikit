@@ -95,6 +95,9 @@ ikit net zt sidecar on|off                         # a ZeroTier container in the
 ikit target attach vm box --zt dev-net --node a1b2c3d4e5 --user ubuntu   # SSH at its ZeroTier address
 ikit target use-zt edge dev-net                    # move an SSH target onto its ZeroTier address
 ikit net zt rm dev-net [--delete]                  # --delete also deletes it in Central
+
+ikit net docker attach regere-dev-platform-network --group app   # join a network ikit does not own
+ikit net docker list | detach regere-dev-platform-network [--group app]
 ```
 
 ### Backups
@@ -120,8 +123,24 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
   files are owner-only (0600). `$` in values is escaped, so passwords reach containers verbatim.
 - Env values come from the registry defaults, values set with `ikit svc set`, the keychain, and
   `from:` references (`service:<name>.host`, `.port`, `.port.<name>`, `.env.<VAR>`).
+- Several workloads can share a target: each is its own Compose project with its own network.
+  `plan` blocks a host port that another applied (or failed) workload on the same target
+  already publishes, unless both bind different addresses. Ports taken by other orgs or by
+  anything else on the host still fail at `docker compose up`.
 - Each apply or destroy holds a per-workload lock and is recorded in the run history. A workload
   must be destroyed before `ikit wl rm` removes it. Kubernetes targets arrive in Phase 5.
+
+### Networks
+
+- Each service group in use gets its own network, owned by the workload's Compose project
+  (`<workload>_app`, `_platform`, `_data`) and removed with it. A service joins its group's
+  network and the ones below it: app → app, platform, data; platform → platform, data;
+  data → data only. Services reach each other by service name.
+- `net docker attach <network> --group <group>` has a group join a Docker network the workload
+  does not own (another Compose project's, or one made with `docker network create`) as
+  `external: true`. ikit never creates or removes it, and `plan` is blocked while it is missing
+  on the target. On it, each service also answers to `<workload>-<service>`, which stays
+  unique when several workloads share the network.
 
 ### Drift
 

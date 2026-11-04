@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ikit_core::{Network, UnknownVariant};
+use ikit_core::{Category, DockerNetwork, Network, UnknownVariant};
 use sqlx::SqlitePool;
 
 use crate::{NetworkRepo, NewNetwork, Result, StateError, map_constraint};
@@ -195,6 +195,66 @@ impl NetworkRepo for SqliteNetworks {
             None => None,
         })
     }
+
+    async fn attach_docker(
+        &self,
+        workload_id: i64,
+        network: &str,
+        group: Category,
+    ) -> Result<bool> {
+        let (group, now) = (group.to_string(), Utc::now());
+        let result = sqlx::query!(
+            r#"INSERT INTO workload_docker_networks (workload_id, network, group_kind, created_at)
+               VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING"#,
+            workload_id,
+            network,
+            group,
+            now,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn detach_docker(
+        &self,
+        workload_id: i64,
+        network: &str,
+        group: Option<Category>,
+    ) -> Result<u64> {
+        let group = group.map(|g| g.to_string());
+        let result = sqlx::query!(
+            r#"DELETE FROM workload_docker_networks
+               WHERE workload_id = ? AND network = ? AND (? IS NULL OR group_kind = ?)"#,
+            workload_id,
+            network,
+            group,
+            group,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn docker_networks(&self, workload_id: i64) -> Result<Vec<DockerNetwork>> {
+        let rows = sqlx::query!(
+            r#"SELECT network, group_kind FROM workload_docker_networks
+               WHERE workload_id = ? ORDER BY network, group_kind"#,
+            workload_id,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(DockerNetwork {
+                    group: r.group_kind.parse().map_err(|e: UnknownVariant| {
+                        StateError::Corrupt(format!("docker network {}: {e}", r.network))
+                    })?,
+                    name: r.network,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -294,5 +354,71 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn docker_network_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = SqliteStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        let target = store
+            .targets()
+            .insert("laptop", TargetOrigin::Attached, &Connection::Local)
+            .await
+            .unwrap();
+        let wl = store
+            .workloads()
+            .create("wl", "dev", target.id)
+            .await
+            .unwrap();
+        let nets = store.networks();
+        assert!(
+            nets.attach_docker(wl.id, "shared", Category::App)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !nets
+                .attach_docker(wl.id, "shared", Category::App)
+                .await
+                .unwrap()
+        );
+        assert!(
+            nets.attach_docker(wl.id, "shared", Category::Data)
+                .await
+                .unwrap()
+        );
+        assert!(
+            nets.attach_docker(wl.id, "other", Category::App)
+                .await
+                .unwrap()
+        );
+        let names = |v: Vec<DockerNetwork>| {
+            v.into_iter()
+                .map(|n| format!("{}:{}", n.name, n.group))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(nets.docker_networks(wl.id).await.unwrap()),
+            ["other:app", "shared:app", "shared:data"]
+        );
+
+        assert_eq!(
+            nets.detach_docker(wl.id, "shared", Some(Category::Data))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(nets.detach_docker(wl.id, "other", None).await.unwrap(), 1);
+        assert_eq!(nets.detach_docker(wl.id, "missing", None).await.unwrap(), 0);
+        assert_eq!(
+            names(nets.docker_networks(wl.id).await.unwrap()),
+            ["shared:app"]
+        );
+
+        // Attachments go with their workload.
+        assert!(store.workloads().delete("wl-dev-001").await.unwrap());
+        assert!(nets.docker_networks(wl.id).await.unwrap().is_empty());
     }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workload_docker_networks (workload_id, network, group_kind, created_at)\n               VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a7f4fe2c52e4f2c44a2a81ba9283af452c58ddb3935383df9302819f862f17d6"
+}

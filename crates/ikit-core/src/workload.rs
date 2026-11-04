@@ -171,6 +171,21 @@ pub struct PublishedPort {
     pub udp: bool,
 }
 
+impl PublishedPort {
+    /// Whether both cannot be bound on one host: the same port and protocol, on the same
+    /// address or with either one on every address.
+    pub fn clashes(&self, other: &PublishedPort) -> bool {
+        let everywhere = |p: &PublishedPort| {
+            p.bind
+                .as_deref()
+                .is_none_or(|b| matches!(b, "0.0.0.0" | "::" | "[::]"))
+        };
+        self.host == other.host
+            && self.udp == other.udp
+            && (everywhere(self) || everywhere(other) || self.bind == other.bind)
+    }
+}
+
 impl fmt::Display for PublishedPort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(bind) = &self.bind {
@@ -216,6 +231,18 @@ impl FromStr for PublishedPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_ports_clash_on_shared_addresses() {
+        let p = |s: &str| s.parse::<PublishedPort>().unwrap();
+        assert!(p("8080:80").clashes(&p("8080:3000")));
+        assert!(p("8080:80").clashes(&p("127.0.0.1:8080:80")));
+        assert!(p("0.0.0.0:8080:80").clashes(&p("10.0.0.5:8080:80")));
+        assert!(p("127.0.0.1:8080:80").clashes(&p("127.0.0.1:8080:81")));
+        assert!(!p("127.0.0.1:8080:80").clashes(&p("10.0.0.5:8080:80")));
+        assert!(!p("8080:80").clashes(&p("8081:80")));
+        assert!(!p("53:53/udp").clashes(&p("53:53")));
+    }
 
     #[test]
     fn published_ports_round_trip() {

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use ikit_core::registry::EnvVar;
-use ikit_core::{ServiceInstance, ServiceSpec};
+use ikit_core::{Category, DockerNetwork, ServiceInstance, ServiceSpec};
 use serde::Serialize;
 
 /// One service with everything needed to render it.
@@ -23,6 +23,8 @@ pub struct WorkloadInput {
     pub services: Vec<ServiceInput>,
     /// The ZeroTier network a sidecar container joins, if the workload runs one.
     pub zerotier: Option<ZtSidecar>,
+    /// Docker networks outside the workload that a group joins as `external: true`.
+    pub external_networks: Vec<DockerNetwork>,
 }
 
 /// A ZeroTier container on the host network that joins the target to a network, so the
@@ -71,6 +73,22 @@ struct ComposeFile {
     services: BTreeMap<String, ComposeService>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     volumes: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    networks: BTreeMap<String, ComposeNetwork>,
+}
+
+#[derive(Serialize)]
+struct ComposeNetwork {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    external: bool,
+}
+
+#[derive(Serialize)]
+struct ServiceNetwork {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    aliases: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +99,8 @@ struct ComposeService {
     command: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     network_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    networks: BTreeMap<String, ServiceNetwork>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     cap_add: Vec<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -151,6 +171,16 @@ pub fn image_registry(image: &str) -> String {
     }
 }
 
+/// The groups whose networks a service in `group` joins: its own, plus the ones below it
+/// (app → platform → data), so data services never see app or platform traffic.
+fn reachable_groups(group: Category) -> &'static [Category] {
+    match group {
+        Category::App => &[Category::App, Category::Platform, Category::Data],
+        Category::Platform => &[Category::Platform, Category::Data],
+        Category::Data => &[Category::Data],
+    }
+}
+
 /// A value an env var resolves to, and whether it must go to the secrets file.
 struct Resolved {
     value: String,
@@ -179,8 +209,13 @@ fn direct_value(s: &ServiceInput, var: &EnvVar) -> Option<Resolved> {
 }
 
 /// Resolves `service:<name>.host | .port | .port.<port name> | .env.<VAR>`. `<name>` is a
-/// service instance, or a registry service if exactly one instance uses it.
-fn resolve_ref(reference: &str, services: &[ServiceInput]) -> Result<Resolved, String> {
+/// service instance, or a registry service if exactly one instance uses it. A `.host` must
+/// be on a network that a service in `from` joins.
+fn resolve_ref(
+    reference: &str,
+    from: Category,
+    services: &[ServiceInput],
+) -> Result<Resolved, String> {
     let rest = reference.strip_prefix("service:").ok_or_else(|| {
         format!("unsupported reference `{reference}` (expected service:<name>.<field>)")
     })?;
@@ -213,7 +248,16 @@ fn resolve_ref(reference: &str, services: &[ServiceInput]) -> Result<Resolved, S
         })
     };
     match field.split_once('.') {
-        None if field == "host" => plain(target.instance.name.clone()),
+        None if field == "host" => {
+            let group = target.instance.group;
+            if !reachable_groups(from).contains(&group) {
+                return Err(format!(
+                    "`{}` is in the {group} group, which a {from} service cannot reach",
+                    target.instance.name
+                ));
+            }
+            plain(target.instance.name.clone())
+        }
         None if field == "port" => match target.spec.ports.first() {
             Some(p) => plain(p.container.to_string()),
             None => Err(format!("`{}` exposes no ports", target.instance.name)),
@@ -252,6 +296,37 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
     let mut secret_services = BTreeMap::new();
     let mut volumes = BTreeMap::new();
     let mut images = Vec::new();
+    // One network per group in use; Compose names them `<workload>_<group>`.
+    let groups: Vec<Category> = Category::ALL
+        .iter()
+        .copied()
+        .filter(|g| input.services.iter().any(|s| s.instance.group == *g))
+        .collect();
+    let mut networks: BTreeMap<String, ComposeNetwork> = groups
+        .iter()
+        .map(|g| {
+            let net = ComposeNetwork {
+                name: None,
+                external: false,
+            };
+            (g.to_string(), net)
+        })
+        .collect();
+    // Compose fails on a missing external network even if no service joins it.
+    let external_networks: Vec<&DockerNetwork> = input
+        .external_networks
+        .iter()
+        .filter(|e| groups.contains(&e.group))
+        .collect();
+    for ext in &external_networks {
+        networks.insert(
+            ext.name.clone(),
+            ComposeNetwork {
+                name: Some(ext.name.clone()),
+                external: true,
+            },
+        );
+    }
 
     for s in &input.services {
         let inst = &s.instance;
@@ -266,13 +341,13 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                     direct_value(s, var)
                 }
                 Some(reference) => {
-                    Some(resolve_ref(reference, &input.services).map_err(|message| {
-                        RenderError::Env {
+                    Some(resolve_ref(reference, inst.group, &input.services).map_err(
+                        |message| RenderError::Env {
                             service: inst.name.clone(),
                             var: var.name.clone(),
                             message,
-                        }
-                    })?)
+                        },
+                    )?)
                 }
                 None => direct_value(s, var),
             };
@@ -349,6 +424,23 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
             })
         });
 
+        let mut service_networks: BTreeMap<String, ServiceNetwork> = reachable_groups(inst.group)
+            .iter()
+            .filter(|g| groups.contains(g))
+            .map(|g| (g.to_string(), ServiceNetwork { aliases: vec![] }))
+            .collect();
+        for ext in external_networks.iter().filter(|e| e.group == inst.group) {
+            // Other workloads on a shared network may run a service of the same name;
+            // the prefixed alias always reaches this one.
+            let alias = format!("{}-{}", input.workload, inst.name);
+            service_networks.insert(
+                ext.name.clone(),
+                ServiceNetwork {
+                    aliases: vec![alias],
+                },
+            );
+        }
+
         let labels = BTreeMap::from([
             ("ikit.org".to_owned(), input.org.clone()),
             ("ikit.workload".to_owned(), input.workload.clone()),
@@ -380,6 +472,7 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                 restart: "unless-stopped",
                 command: vec![],
                 network_mode: None,
+                networks: service_networks,
                 cap_add: vec![],
                 devices: vec![],
                 environment,
@@ -407,6 +500,7 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                 // The image's entrypoint joins the networks it is given.
                 command: vec![zt.network_id.clone()],
                 network_mode: Some("host"),
+                networks: BTreeMap::new(),
                 cap_add: vec!["NET_ADMIN", "SYS_ADMIN"],
                 devices: vec!["/dev/net/tun"],
                 environment: BTreeMap::new(),
@@ -432,6 +526,7 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
         name: input.workload.clone(),
         services,
         volumes,
+        networks,
     };
     let compose = format!(
         "{header}{}",
@@ -578,6 +673,7 @@ pub(crate) mod tests {
                 },
             ],
             zerotier: None,
+            external_networks: vec![],
         }
     }
 
@@ -677,6 +773,89 @@ pub(crate) mod tests {
         assert_eq!(
             render(&input).unwrap_err(),
             RenderError::Reserved(ZT_SIDECAR.into())
+        );
+    }
+
+    #[test]
+    fn groups_get_their_own_networks() {
+        let c = yaml(&render(&sample()).unwrap().compose);
+        // postgres is in data, orders-api in app; there is no platform service.
+        assert_eq!(c["networks"]["app"], yaml("{}"));
+        assert_eq!(c["networks"]["data"], yaml("{}"));
+        assert!(c["networks"].get("platform").is_none());
+        let joined = |svc: &str| -> Vec<String> {
+            c["services"][svc]["networks"]
+                .as_mapping()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            joined("postgres"),
+            ["data"],
+            "data stays off the app network"
+        );
+        assert_eq!(joined("orders-api"), ["app", "data"]);
+    }
+
+    #[test]
+    fn host_references_must_be_reachable_over_the_group_networks() {
+        let mut input = sample();
+        input.services[0].spec.env.push(EnvVar {
+            name: "API_HOST".into(),
+            from: Some("service:orders-api.host".into()),
+            ..Default::default()
+        });
+        let err = render(&input).unwrap_err().to_string();
+        assert!(err.contains("API_HOST"), "{err}");
+        assert!(err.contains("cannot reach"), "{err}");
+
+        // Ports and env values are plain values, so they may point up a group.
+        let mut input = sample();
+        input.services[1].spec.ports = vec![Port {
+            container: 8080,
+            name: None,
+            protocol: Protocol::Tcp,
+        }];
+        input.services[0].spec.env.push(EnvVar {
+            name: "API_PORT".into(),
+            from: Some("service:orders-api.port".into()),
+            ..Default::default()
+        });
+        let c = yaml(&render(&input).unwrap().compose);
+        assert_eq!(c["services"]["postgres"]["environment"]["API_PORT"], "8080");
+    }
+
+    #[test]
+    fn external_networks_are_joined_by_their_group_with_an_alias() {
+        let mut input = sample();
+        input.zerotier = Some(ZtSidecar {
+            network_id: "8056c2e21c000001".into(),
+        });
+        input.external_networks = vec![DockerNetwork {
+            name: "regere-dev-platform-network".into(),
+            group: Category::App,
+        }];
+        let c = yaml(&render(&input).unwrap().compose);
+        let net = &c["networks"]["regere-dev-platform-network"];
+        assert_eq!(net["name"], "regere-dev-platform-network");
+        assert_eq!(net["external"], true);
+        let api = &c["services"]["orders-api"]["networks"];
+        assert_eq!(
+            api["regere-dev-platform-network"]["aliases"][0],
+            "wl-acme-dev-001-orders-api"
+        );
+        assert_eq!(api["app"], yaml("{}"));
+        assert!(
+            c["services"]["postgres"]["networks"]
+                .get("regere-dev-platform-network")
+                .is_none(),
+            "only the attached group joins"
+        );
+        assert!(
+            c["services"][ZT_SIDECAR].get("networks").is_none(),
+            "the sidecar stays on the host network"
         );
     }
 
