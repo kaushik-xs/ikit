@@ -1,4 +1,4 @@
-//! ZeroTier for ikit: a client for the Central API (networks and members) and parsers for
+//! ZeroTier for ikit: a client for the Central API v2 (networks and members) and parsers for
 //! `zerotier-cli -j` output. Running `zerotier-cli`, locally or over SSH, is left to the
 //! caller so it can go through ikit's command runner.
 

@@ -238,7 +238,8 @@ pub(crate) mod testing {
         (dir, app, secrets)
     }
 
-    /// An in-memory ZeroTier Central: one network ID per create, members by node ID.
+    /// An in-memory ZeroTier Central API v2: one network group, one network ID per create,
+    /// members by node ID.
     pub async fn fake_central() -> String {
         use axum::extract::{Path, State};
         use axum::http::{HeaderMap, StatusCode};
@@ -254,19 +255,46 @@ pub(crate) mod testing {
         type Shared = Arc<std::sync::Mutex<Db>>;
 
         fn authed(h: &HeaderMap) -> Result<(), StatusCode> {
-            (h.get("authorization").and_then(|v| v.to_str().ok()) == Some("token secret"))
+            (h.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer secret"))
                 .then_some(())
                 .ok_or(StatusCode::UNAUTHORIZED)
         }
 
+        fn new_member(node: &str, name: Option<&str>) -> Value {
+            json!({ "deviceId": node, "name": name.unwrap_or(""), "status": "not_authorized",
+                    "ipv4Assignments": [] })
+        }
+
+        fn set_status(
+            db: &Shared,
+            h: &HeaderMap,
+            id: String,
+            node: String,
+            authorized: bool,
+        ) -> Result<Json<Value>, StatusCode> {
+            authed(h)?;
+            let mut db = db.lock().unwrap();
+            let m = db.members.get_mut(&(id, node)).ok_or(StatusCode::NOT_FOUND)?;
+            m["status"] = json!(if authorized { "authorized" } else { "not_authorized" });
+            m["ipv4Assignments"] = json!(if authorized { vec!["10.147.17.5"] } else { vec![] });
+            Ok(Json(m.clone()))
+        }
+
         let app = Router::new()
             .route(
-                "/network",
+                "/network-group",
+                get(|h: HeaderMap| async move {
+                    authed(&h)?;
+                    Ok::<_, StatusCode>(Json(json!({ "items": [{ "id": "g1", "name": "default" }] })))
+                }),
+            )
+            .route(
+                "/network-group/{group}/network",
                 post(|State(db): State<Shared>, h: HeaderMap, Json(body): Json<Value>| async move {
                     authed(&h)?;
                     let mut db = db.lock().unwrap();
                     let id = format!("8056c2e21c{:06x}", db.networks.len() + 1);
-                    let net = json!({ "id": id, "config": body["config"] });
+                    let net = json!({ "id": id, "name": body["name"], "config": body["config"] });
                     db.networks.insert(id, net.clone());
                     Ok::<_, StatusCode>(Json(net))
                 }),
@@ -290,35 +318,74 @@ pub(crate) mod testing {
                     let members: Vec<Value> =
                         db.members.iter().filter(|((n, _), _)| *n == id).map(|(_, m)| m.clone()).collect();
                     Ok::<_, StatusCode>(Json(members))
-                }),
+                })
+                .post(
+                    |State(db): State<Shared>,
+                     h: HeaderMap,
+                     Path(id): Path<String>,
+                     Json(body): Json<Vec<Value>>| async move {
+                        authed(&h)?;
+                        let mut db = db.lock().unwrap();
+                        if !db.networks.contains_key(&id) {
+                            return Err(StatusCode::NOT_FOUND);
+                        }
+                        let mut added = Vec::new();
+                        for m in body {
+                            let node = m["deviceId"].as_str().unwrap_or_default().to_owned();
+                            let member = new_member(&node, m["name"].as_str());
+                            db.members.insert((id.clone(), node), member.clone());
+                            added.push(member);
+                        }
+                        Ok(Json(added))
+                    },
+                ),
             )
             .route(
                 "/network/{id}/member/{node}",
-                post(
+                get(
+                    |State(db): State<Shared>,
+                     h: HeaderMap,
+                     Path((id, node)): Path<(String, String)>| async move {
+                        authed(&h)?;
+                        db.lock().unwrap().members.get(&(id, node)).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
+                    },
+                )
+                .post(
                     |State(db): State<Shared>,
                      h: HeaderMap,
                      Path((id, node)): Path<(String, String)>,
                      Json(body): Json<Value>| async move {
                         authed(&h)?;
                         let mut db = db.lock().unwrap();
-                        if !db.networks.contains_key(&id) {
-                            return Err(StatusCode::NOT_FOUND);
-                        }
-                        let m = db.members.entry((id, node.clone())).or_insert_with(|| {
-                            json!({ "nodeId": node, "config": { "authorized": false, "ipAssignments": [] } })
-                        });
-                        if let Some(a) = body["config"]["authorized"].as_bool() {
-                            m["config"]["authorized"] = json!(a);
-                            m["config"]["ipAssignments"] = json!(if a { vec!["10.147.17.5"] } else { vec![] });
-                        }
+                        let m = db.members.get_mut(&(id, node)).ok_or(StatusCode::NOT_FOUND)?;
                         if let Some(n) = body["name"].as_str() {
                             m["name"] = json!(n);
                         }
-                        Ok(Json(m.clone()))
+                        Ok::<_, StatusCode>(Json(m.clone()))
                     },
                 ),
             )
-            .with_state(Shared::default());
+            .route(
+                "/network/{id}/member/{node}/authorize",
+                post(
+                    |State(db): State<Shared>,
+                     h: HeaderMap,
+                     Path((id, node)): Path<(String, String)>| async move {
+                        set_status(&db, &h, id, node, true)
+                    },
+                ),
+            )
+            .route(
+                "/network/{id}/member/{node}/de-authorize",
+                post(
+                    |State(db): State<Shared>,
+                     h: HeaderMap,
+                     Path((id, node)): Path<(String, String)>| async move {
+                        set_status(&db, &h, id, node, false)
+                    },
+                ),
+            )
+        .with_state(Shared::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -331,7 +398,7 @@ pub(crate) mod testing {
         app.profile_add(crate::AddProfile {
             kind: ikit_core::ProfileKind::Zerotier,
             name: "zt".into(),
-            values: [("api_url", url.as_str()), ("api_token", "secret")]
+            values: [("api_url", url.as_str()), ("api_token", "secret"), ("org_id", "org1")]
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .collect(),

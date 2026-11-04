@@ -40,7 +40,8 @@ enum Root {
 #[derive(Debug, Clone)]
 pub struct EdgeInstallRequest {
     pub kind: EdgeKind,
-    /// ACME account email for this org's certificates.
+    /// ACME account email for this org's certificates; saved as the org's `edge.acme_email`.
+    /// `None` uses the one already in the org config.
     pub email: Option<String>,
     pub ca: AcmeCa,
     /// A package version to install (`apt-cache policy` / `dnf list` spelling).
@@ -357,6 +358,8 @@ impl App {
         if let Some(v) = &req.version {
             check_version(v)?;
         }
+        let mut org_config = self.config()?;
+        let email = req.email.clone().or(org_config.edge.acme_email.clone());
         let target = self.target_show(target).await?;
         let org = self.org.name.clone();
         let probe = self.probe_host(&target, Root::Required).await?;
@@ -439,9 +442,13 @@ impl App {
         } else {
             None
         };
+        if org_config.edge.acme_email != email {
+            org_config.edge.acme_email = email.clone();
+            crate::orgs::write_org_config(&self.paths, &self.org.name, &org_config)?;
+        }
         let config = EdgeConfig {
             kind,
-            email: req.email,
+            email,
             ca: req.ca,
             version: manifest.version.clone(),
         };
@@ -783,12 +790,17 @@ impl App {
         let file = provider::site_file(&self.org.name, &wl.name);
         let applied = self.read_site(target, &file).await?;
         let rendered = if wanted {
+            // The org's email wins over the one saved on the target when the proxy was set up.
+            let edge = EdgeConfig {
+                email: self.config()?.edge.acme_email.or(config.email.clone()),
+                ..config.clone()
+            };
             let input = SiteInput {
                 org: &self.org.name,
                 workload: &wl.name,
                 routes: &routes,
                 redirects: &redirects,
-                edge: config,
+                edge: &edge,
             };
             match provider::render_site(config.kind, &input) {
                 Ok(r) => Some(r),
@@ -1429,6 +1441,11 @@ mod tests {
         assert_eq!(
             (m.installed_by.as_str(), m.version.as_deref()),
             ("acme", Some("2.10.0"))
+        );
+        // The email is the org's, kept in its config for later installs.
+        assert_eq!(
+            acme.config().unwrap().edge.acme_email.as_deref(),
+            Some("ops@acme.invalid")
         );
 
         // Globex cannot bring Ferron, but joins Caddy.

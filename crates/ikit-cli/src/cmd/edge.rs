@@ -18,7 +18,8 @@ pub enum EdgeCmd {
         target: String,
         /// caddy or ferron (default: the one already on the host, else asked).
         kind: Option<EdgeKind>,
-        /// ACME account email for this org's certificates.
+        /// ACME account email for this org's certificates, saved as `edge.acme_email` in the
+        /// org's config.yaml (default: the one already there).
         #[arg(long)]
         email: Option<String>,
         /// Use Let's Encrypt staging (untrusted certificates, for trying things out).
@@ -80,7 +81,7 @@ pub async fn run(ctx: &Ctx, app: &App, cmd: EdgeCmd) -> anyhow::Result<()> {
             };
             let email = match email {
                 Some(e) => Some(e),
-                None if ctx.interactive => {
+                None if ctx.interactive && app.config()?.edge.acme_email.is_none() => {
                     let e = Text::new("ACME email for certificate notices (optional):").prompt()?;
                     (!e.trim().is_empty()).then(|| e.trim().to_owned())
                 }

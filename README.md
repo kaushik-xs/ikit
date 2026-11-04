@@ -84,7 +84,7 @@ ikit mcp serve --http zt:7420                      # streamable HTTP on this mac
 ikit mcp serve --http 127.0.0.1:7420               # or loopback only
 ikit mcp token list | rm <name>
 
-ikit profile add zerotier zt                       # prompts for the Central API token (or IKIT_SECRET_API_TOKEN)
+ikit profile add zerotier zt --set org_id=<org>    # prompts for a service account API key (or IKIT_SECRET_API_TOKEN)
 ikit net zt create dev-net --profile zt            # private network, links the selected workload
 ikit net zt attach shared 8056c2e21c000001 --profile zt   # an existing network
 ikit net zt join dev-net --target box --authorize  # zerotier-cli join over SSH, then authorize
@@ -152,6 +152,9 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
 - A proxy that is already installed is adopted: ikit appends its include line to the existing
   config and leaves the rest alone, and `uninstall` only takes that line out again. Another
   server on 80/443 (nginx, a container) makes `install` refuse.
+- The ACME email belongs to the org: `--email` saves it as `edge.acme_email` in the org's
+  `config.yaml`, later installs on other targets reuse it, and every site this org renders uses
+  it for its certificates.
 - One proxy serves every org on the host. `/etc/ikit/edge/host.json` records the server and the
   orgs that joined; a second org's `install` joins it (`--exclusive` keeps others off). Each
   workload has its own site file whose header names its org, workload, domains and upstream
@@ -234,7 +237,10 @@ SQL hooks:
 
 ### ZeroTier
 
-- A `zerotier` profile holds the Central API token (keychain) and an optional `api_url`.
+- ikit talks to the ZeroTier Central API v2 (New Central). A `zerotier` profile holds a service
+  account's API key (keychain), the `org_id`, an optional `network_group` for new networks
+  (default: the org's only group, or a new `ikit` group when it has none) and an optional
+  `api_url` (default `https://central.zerotier.com/api/v2`). Legacy v1 tokens are not accepted.
 - `net zt create` makes a private network with a managed route and address pool (default: the
   first free `10.147.x.0/24` in the org) and links the selected workload unless `--no-link`.
   A workload is linked to at most one network; a network can serve many workloads.

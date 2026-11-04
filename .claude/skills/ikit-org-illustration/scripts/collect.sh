@@ -27,6 +27,9 @@ q "select host, username from registry_logins"
 section "targets"
 q "select name, kind, origin, connection_json, status, last_checked_at, last_check_json from targets"
 
+section "edge (reverse proxy per target; ACME email is the org's edge.acme_email above)"
+q "select name as target, edge_json from targets where edge_json is not null"
+
 section "profiles"
 q "select kind, name from profiles"
 
@@ -60,6 +63,14 @@ q "select w.name as workload, n.name as zerotier_network, wn.sidecar from worklo
    join workloads w on w.id = wn.workload_id join networks n on n.id = wn.network_id"
 q "select w.name as workload, d.network as external_docker_network, d.group_kind from workload_docker_networks d
    join workloads w on w.id = d.workload_id"
+
+section "routes"
+q "select w.name as workload, r.service, r.port, r.host, r.path, r.tls, r.upstream_port, r.origin
+   from routes r join workloads w on w.id = r.workload_id order by w.name, r.host, r.path"
+q "select w.name as workload, d.host, d.to_url, d.permanent, d.tls from redirects d
+   join workloads w on w.id = d.workload_id order by w.name, d.host"
+q "select w.name as workload, a.config_json as auto_routes from auto_routes a
+   join workloads w on w.id = a.workload_id"
 
 section "runs"
 q "select w.name as workload, r.id, r.action, r.result, r.started_at from runs r

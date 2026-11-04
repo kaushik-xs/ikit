@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::edge::{TlsMode, is_hostname};
+use crate::edge::{TlsMode, is_email, is_hostname};
 use crate::registry::Category;
 use crate::workload::is_env;
 
@@ -29,6 +29,9 @@ pub struct EdgeDefaults {
     /// Domain that routes without an explicit host go under, e.g. `acme.dev`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_domain: Option<String>,
+    /// ACME account email for this org's certificates, on every target's proxy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acme_email: Option<String>,
     /// Host of a route without an explicit one: `{service}`, `{workload}`, `{env}`,
     /// `{org}` and `{base_domain}` are filled in.
     pub host_template: String,
@@ -63,6 +66,7 @@ impl Default for EdgeDefaults {
     fn default() -> Self {
         Self {
             base_domain: None,
+            acme_email: None,
             host_template: "{service}.{workload}.{base_domain}".to_owned(),
             default_tls: TlsMode::Acme,
             require_tls_envs: default_digest_envs(),
@@ -137,6 +141,13 @@ impl Config {
                 "invalid edge.base_domain `{d}`: use a domain such as acme.dev"
             ));
         }
+        if let Some(e) = &self.edge.acme_email
+            && !is_email(e)
+        {
+            return Err(format!(
+                "invalid edge.acme_email `{e}`: use an address such as ops@acme.com"
+            ));
+        }
         let [first, last] = self.edge.upstream_ports;
         if first < 1024 || first > last {
             return Err(format!(
@@ -186,6 +197,7 @@ mod tests {
         assert!(bad(|c| c.envs.push("u-a-t".into())));
         assert!(bad(|c| c.edge.base_domain = Some("dev".into())));
         assert!(bad(|c| c.edge.upstream_ports = [80, 90]));
+        assert!(bad(|c| c.edge.acme_email = Some("ops".into())));
     }
 
     #[test]

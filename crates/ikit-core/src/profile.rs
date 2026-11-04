@@ -112,9 +112,19 @@ const GCP_FIELDS: &[FieldSpec] = &[
 ];
 
 const ZEROTIER_FIELDS: &[FieldSpec] = &[
-    FieldSpec::new("api_url", "ZeroTier Central API URL", Optional)
-        .default_value("https://api.zerotier.com/api/v1"),
-    FieldSpec::new("api_token", "ZeroTier Central API token", Required).secret(),
+    FieldSpec::new("api_url", "ZeroTier Central API v2 URL", Optional)
+        .default_value("https://central.zerotier.com/api/v2"),
+    FieldSpec::new("api_token", "Service account API key", Required).secret(),
+    FieldSpec::new(
+        "org_id",
+        "Organization ID (needed to create networks)",
+        Optional,
+    ),
+    FieldSpec::new(
+        "network_group",
+        "Network group ID for new networks (default: the org's only group)",
+        Optional,
+    ),
 ];
 
 const K8S_FIELDS: &[FieldSpec] = &[
@@ -317,7 +327,7 @@ mod tests {
     #[test]
     fn applies_defaults() {
         let v = validate(ProfileKind::Zerotier, "zt", values(&[("api_token", "t")])).unwrap();
-        assert_eq!(v.config["api_url"], "https://api.zerotier.com/api/v1");
+        assert_eq!(v.config["api_url"], "https://central.zerotier.com/api/v2");
     }
 
     #[test]

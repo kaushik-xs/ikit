@@ -29,6 +29,8 @@ pub struct OrgSummary {
     pub display_name: Option<String>,
     pub prefix: String,
     pub envs: Vec<String>,
+    /// ACME account email for the org's certificates (`edge.acme_email`).
+    pub acme_email: Option<String>,
     pub workloads: usize,
     pub active: bool,
     pub dir: PathBuf,
@@ -164,6 +166,7 @@ async fn summary(paths: &Paths, name: &str, ctx: &Context) -> Result<OrgSummary>
         display_name: config.display_name,
         prefix: config.prefix,
         envs: config.envs,
+        acme_email: config.edge.acme_email,
         workloads,
         active: ctx.org.as_deref() == Some(name),
         dir: paths.org(name).dir,

@@ -129,6 +129,9 @@ fn render(o: &OrgSummary) {
     }
     t.add_row(vec!["prefix".to_owned(), o.prefix.clone()]);
     t.add_row(vec!["envs".to_owned(), o.envs.join(", ")]);
+    if let Some(e) = &o.acme_email {
+        t.add_row(vec!["acme email".to_owned(), e.clone()]);
+    }
     t.add_row(vec!["workloads".to_owned(), o.workloads.to_string()]);
     t.add_row(vec!["folder".to_owned(), o.dir.display().to_string()]);
     println!("{t}");

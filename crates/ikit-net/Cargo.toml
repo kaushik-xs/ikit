@@ -1,6 +1,6 @@
 [package]
 name = "ikit-net"
-description = "ikit networking: the ZeroTier Central API client and zerotier-cli output parsing"
+description = "ikit networking: the ZeroTier Central API v2 client and zerotier-cli output parsing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

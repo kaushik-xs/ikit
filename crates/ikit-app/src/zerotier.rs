@@ -15,7 +15,7 @@ use crate::deploy::sh;
 use crate::targets::ssh_args;
 use crate::{App, AppError, Result};
 
-const DEFAULT_API: &str = "https://api.zerotier.com/api/v1";
+const DEFAULT_API: &str = "https://central.zerotier.com/api/v2";
 
 const ZT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -218,7 +218,10 @@ impl App {
             AppError::Invalid(format!("profile zerotier/{profile} has no api_token"))
         })?;
         let base = values.get("api_url").map_or(DEFAULT_API, String::as_str);
-        Ok(Central::new(base, token))
+        Ok(Central::new(base, token).with_org(
+            values.get("org_id").map(String::as_str),
+            values.get("network_group").map(String::as_str),
+        ))
     }
 
     pub async fn zt_show_network(&self, name: &str) -> Result<Network> {

@@ -20,7 +20,8 @@ picture contains org-specific names, images and secret env names.
    It reads `config.yaml`, `state.db` (read-only) and each `deploy/<workload>/compose.yaml`,
    and prints registry, logins, targets, profiles, storages, ZeroTier networks, workloads,
    services (with secret env *names*), hooks, workload networks, runs, locks, the backup
-   count and, per workload, `depends_on` edges, Compose networks and published ports.
+   count, each target's reverse proxy (`edge_json`), routes, redirects and auto-route
+   settings, and per workload `depends_on` edges, Compose networks and published ports.
    Secret values live in the OS keychain; never try to read them.
    If something needs more detail, `cat ~/.ikit/orgs/<org>/workloads/<wl>.yaml` too.
 
@@ -33,9 +34,19 @@ picture contains org-specific names, images and secret env names.
      today's date, `<h1>` display name, one-paragraph lede) above it in HTML.
    - Org frame. Left column "Org-wide": Registry (services grouped app / platform / data,
      with versions; registry logins by host only), each Target (kind, connection type,
-     status dot, last check), and a dashed "Not set up yet" box for profiles, storages,
+     status dot, last check, and the workloads on it or "no workloads yet"), and a dashed
+     "Not set up yet" box for profiles, storages,
      ZeroTier networks, backups or MCP tokens that don't exist. Things that *do* exist get
      a real box instead.
+   - Edge. In the Org-wide column, an "Edge defaults" box from the `edge:` section of
+     `config.yaml`: the ACME email (`edge.acme_email`, the org's account for every
+     target's certificates), base domain, host template and auto-route groups; leave out
+     keys that aren't set and say "no ACME email" if it's missing. On each target box
+     that has `edge_json`, a proxy line: kind, version, ACME CA (production or staging).
+     A target without one gets "no reverse proxy" (or, if you checked the host and found
+     one ikit hasn't adopted, say that). When routes or redirects exist, draw a
+     "Routes" box per workload frame: host[/path] → service:port, TLS mode, and an arrow
+     from the target's proxy line to it.
    - One workload frame per workload: name, status pill, env, target. Inside it one box
      per service group that exists (app blue, platform amber, data green); say which group
      is missing. One node per service: name, short image:tag, one useful fact (host port,
