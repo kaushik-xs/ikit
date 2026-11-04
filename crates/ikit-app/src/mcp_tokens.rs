@@ -1,5 +1,6 @@
 //! Bearer tokens for `ikit mcp serve --http`, in `orgs/<org>/mcp-tokens.yaml` (owner-only).
-//! Only SHA-256 hashes are stored; a token is shown once, when it is created.
+//! Only SHA-256 hashes are stored; a token is shown once, when it is created. A token can be
+//! limited to some workloads; within them, the org's `mcp.yaml` still decides what it may do.
 
 use std::fs;
 
@@ -18,6 +19,9 @@ pub struct McpToken {
     pub name: String,
     /// Hex SHA-256 of the token.
     pub sha256: String,
+    /// Workloads the token can reach; empty means every workload in the org.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workloads: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -48,29 +52,38 @@ fn save(org: &OrgPaths, file: &TokenFile) -> Result<()> {
     Ok(write_private(&org.mcp_tokens_file(), &yaml)?)
 }
 
-/// The name of the token matching `presented`, if any. The file is read on every call so
-/// a removed token stops working without restarting the server.
-pub fn mcp_token_verify(org: &OrgPaths, presented: &str) -> Result<Option<String>> {
+/// The token matching `presented`, if any. The file is read on every call so a removed
+/// token stops working without restarting the server.
+pub fn mcp_token_verify(org: &OrgPaths, presented: &str) -> Result<Option<McpToken>> {
     if !presented.starts_with(PREFIX) {
         return Ok(None);
     }
     let digest = hash(presented);
-    Ok(load(org)?
-        .tokens
-        .into_iter()
-        .find(|t| t.sha256 == digest)
-        .map(|t| t.name))
+    Ok(load(org)?.tokens.into_iter().find(|t| t.sha256 == digest))
 }
 
 impl App {
     /// Creates a token and returns it with its record. The token itself is not stored.
-    pub fn mcp_token_create(&self, name: &str) -> Result<(McpToken, String)> {
+    /// `workloads` limits it to those workloads, which must exist; empty means the whole org.
+    pub async fn mcp_token_create(
+        &self,
+        name: &str,
+        workloads: &[String],
+    ) -> Result<(McpToken, String)> {
         if !ikit_core::is_slug(name) {
             return Err(AppError::Invalid(format!(
                 "invalid token name `{name}`: use {}",
                 ikit_core::SLUG_RULE
             )));
         }
+        let mut scope = Vec::new();
+        for w in workloads {
+            self.workload_get(w).await?;
+            if !scope.contains(w) {
+                scope.push(w.clone());
+            }
+        }
+        scope.sort();
         let mut file = load(&self.org)?;
         if file.tokens.iter().any(|t| t.name == name) {
             return Err(AppError::AlreadyExists(format!("MCP token `{name}`")));
@@ -85,6 +98,7 @@ impl App {
         let record = McpToken {
             name: name.to_owned(),
             sha256: hash(&token),
+            workloads: scope,
             created_at: Utc::now(),
         };
         file.tokens.push(record.clone());
@@ -115,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn tokens_verify_until_removed() {
         let (_dir, app, _) = app().await;
-        let (record, token) = app.mcp_token_create("laptop").unwrap();
+        let (record, token) = app.mcp_token_create("laptop", &[]).await.unwrap();
         assert!(token.starts_with("ikit_") && token.len() == 69);
         assert_ne!(record.sha256, token);
         assert!(
@@ -134,14 +148,49 @@ mod tests {
         }
 
         assert_eq!(
-            mcp_token_verify(app.org(), &token).unwrap().as_deref(),
-            Some("laptop")
+            mcp_token_verify(app.org(), &token).unwrap().map(|t| t.name),
+            Some("laptop".to_owned())
         );
         assert_eq!(mcp_token_verify(app.org(), "ikit_nope").unwrap(), None);
-        assert!(app.mcp_token_create("laptop").is_err(), "names are unique");
+        assert!(
+            app.mcp_token_create("laptop", &[]).await.is_err(),
+            "names are unique"
+        );
 
         app.mcp_token_remove("laptop").unwrap();
         assert_eq!(mcp_token_verify(app.org(), &token).unwrap(), None);
         assert!(app.mcp_token_remove("laptop").is_err());
+    }
+
+    #[tokio::test]
+    async fn tokens_can_be_limited_to_existing_workloads() {
+        let (_dir, app, _) = app().await;
+        app.target_attach("laptop", ikit_core::Connection::Local)
+            .await
+            .unwrap();
+        app.workload_create("dev", "laptop").await.unwrap();
+        app.workload_create("dev", "laptop").await.unwrap();
+
+        let e = app
+            .mcp_token_create("ci", &["wl-acme-dev-009".into()])
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("wl-acme-dev-009"), "{e}");
+        assert!(app.mcp_token_list().unwrap().is_empty());
+
+        let wls = [
+            "wl-acme-dev-002".into(),
+            "wl-acme-dev-001".into(),
+            "wl-acme-dev-002".into(),
+        ];
+        let (record, token) = app.mcp_token_create("ci", &wls).await.unwrap();
+        assert_eq!(record.workloads, ["wl-acme-dev-001", "wl-acme-dev-002"]);
+        let found = mcp_token_verify(app.org(), &token).unwrap().unwrap();
+        assert_eq!(found.workloads, record.workloads);
+
+        // Org-wide tokens keep the old file format.
+        app.mcp_token_create("all", &[]).await.unwrap();
+        let yaml = fs::read_to_string(app.org().mcp_tokens_file()).unwrap();
+        assert_eq!(yaml.matches("workloads:").count(), 1, "{yaml}");
     }
 }

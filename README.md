@@ -77,6 +77,9 @@ ikit registry outdated [--current]                 # services behind the registr
 
 ikit mcp install claude                            # registers `ikit --org <org> mcp serve` with Claude Code
 ikit mcp token create laptop                       # bearer token for HTTP, shown once
+ikit mcp token create ci --workload wl-acme-dev-001   # a token that only reaches that workload
+ikit mcp serve --workload wl-acme-dev-001          # the whole server limited to it (stdio or HTTP)
+ikit mcp install claude --workload wl-acme-dev-001 # registers it as `ikit-wl-acme-dev-001`
 ikit mcp serve --http zt:7420                      # streamable HTTP on this machine's ZeroTier address
 ikit mcp serve --http 127.0.0.1:7420               # or loopback only
 ikit mcp token list | rm <name>
@@ -211,6 +214,14 @@ request. HOST must be loopback (`localhost`, `127.0.0.1`, `::1`) or ZeroTier: an
 ZeroTier assigned to this machine, `zt` (the first joined network), a network ID or an
 interface name. Other interfaces, including `0.0.0.0`, are refused. With Claude Code:
 `claude mcp add --transport http ikit-acme http://10.147.17.5:7420/mcp --header "Authorization: Bearer <token>"`.
+
+Access can be limited to some workloads: a token with `ikit mcp token create <name> --workload
+<wl>` (repeat or comma-separate), or the whole server with `ikit mcp serve --workload <wl>`.
+Over HTTP a request reaches the workloads both allow. Other workloads look as if they did not
+exist, lists and `registry_show`'s `used_by` leave them out, `target_list` and `zt_status`
+show only the scoped workloads' targets and networks, and `workload_create` and `zt_authorize`
+are refused. A scope only narrows: `mcp.yaml` still decides what may be done in each env.
+`ikit mcp token list` shows each token's workloads.
 
 `deploy_apply` needs the `plan_id` that `deploy_plan` returned and is refused if anything changed
 since. `deploy_destroy` first returns a confirmation token (valid 5 minutes, single use) and

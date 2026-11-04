@@ -8,8 +8,13 @@
 //! workload's env. Deploy tools (apply by plan ID, destroy by confirmation token) are off
 //! unless `mcp.yaml` enables them too, as is `zt_authorize` for ZeroTier members. Prompts give agents ready-made workflows: diagnosing
 //! a workload, planning upgrades, and reviewing a plan before it is applied.
+//!
+//! A [`Scope`] can limit a client to some workloads: the whole server with
+//! `ikit mcp serve --workload`, and each HTTP request with a token from
+//! `ikit mcp token create --workload`. Other workloads look as if they did not exist, and
+//! tools that act on the whole org are refused. A scope only narrows what `mcp.yaml` allows.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +22,9 @@ use ikit_app::{App, KeyringStore, Paths, RegistryFilter};
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, PromptMessage, Role, ServerCapabilities, ServerConfig};
+use rmcp::model::{
+    Extensions, Implementation, PromptMessage, Role, ServerCapabilities, ServerConfig,
+};
 use rmcp::{
     ServerHandler, ServiceExt, prompt, prompt_handler, prompt_router, tool, tool_handler,
     tool_router,
@@ -26,10 +33,77 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// The workloads a client can reach: every workload in the org, or only some.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Scope(Option<Arc<BTreeSet<String>>>);
+
+impl Scope {
+    /// Every workload in the org.
+    pub fn org() -> Self {
+        Self(None)
+    }
+
+    /// Only these workloads.
+    pub fn workloads(names: impl IntoIterator<Item = String>) -> Self {
+        Self(Some(Arc::new(names.into_iter().collect())))
+    }
+
+    /// A token's scope: its workloads, or the whole org when it lists none.
+    pub fn of_token(token: &ikit_app::McpToken) -> Self {
+        if token.workloads.is_empty() {
+            Self::org()
+        } else {
+            Self::workloads(token.workloads.iter().cloned())
+        }
+    }
+
+    pub fn allows(&self, workload: &str) -> bool {
+        self.0.as_ref().is_none_or(|s| s.contains(workload))
+    }
+
+    /// The workloads both scopes reach.
+    fn and(&self, other: &Scope) -> Scope {
+        match (&self.0, &other.0) {
+            (None, _) => other.clone(),
+            (_, None) => self.clone(),
+            (Some(a), Some(b)) => Self::workloads(a.intersection(b).cloned()),
+        }
+    }
+
+    /// Fails as if `workload` did not exist when it is out of scope, so a scoped client
+    /// cannot find out which other workloads there are.
+    fn check(&self, workload: &str) -> Result<(), String> {
+        if self.allows(workload) {
+            return Ok(());
+        }
+        Err(ikit_app::AppError::NotFound(format!("workload `{workload}`")).to_string())
+    }
+
+    /// Fails unless the client can reach the whole org.
+    fn check_org(&self, tool: &str) -> Result<(), String> {
+        match &self.0 {
+            None => Ok(()),
+            Some(names) => Err(format!(
+                "`{tool}` needs access to the whole org; this client is limited to {}",
+                if names.is_empty() {
+                    "no workloads".to_owned()
+                } else {
+                    names.iter().cloned().collect::<Vec<_>>().join(", ")
+                }
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IkitServer {
     paths: Paths,
     org: String,
+    /// What every client of this server can reach; requests can only narrow it.
+    scope: Scope,
+    /// Over HTTP, every request must carry the scope of its token (see `require_token`);
+    /// a request without one reaches nothing.
+    token_scoped: bool,
     /// Random per-process key: plan IDs and destroy tokens cannot be forged or reused across
     /// server restarts.
     key: Arc<String>,
@@ -166,6 +240,8 @@ impl IkitServer {
         Self {
             paths,
             org,
+            scope: Scope::org(),
+            token_scoped: false,
             key: Arc::new(digest(&[
                 &format!("{:?}", std::time::SystemTime::now()),
                 &std::process::id().to_string(),
@@ -177,6 +253,24 @@ impl IkitServer {
                 + Self::deploy_router()
                 + Self::zt_router(),
             prompt_router: Self::prompt_router(),
+        }
+    }
+
+    /// Limits every client of this server to `scope`.
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// The scope of one request: the server's, narrowed by its HTTP token.
+    fn scope(&self, ext: &Extensions) -> Scope {
+        let token = ext
+            .get::<axum::http::request::Parts>()
+            .and_then(|p| p.extensions.get::<Scope>());
+        match token {
+            Some(t) => self.scope.and(t),
+            None if self.token_scoped => Scope::workloads([]),
+            None => self.scope.clone(),
         }
     }
 
@@ -199,8 +293,10 @@ impl IkitServer {
         ])
     }
 
-    /// The app, after checking `mcp.yaml` allows changing `workload`'s definitions.
-    async fn mutable(&self, workload: &str) -> Result<App, String> {
+    /// The app, after checking `workload` is in scope and `mcp.yaml` allows changing its
+    /// definitions.
+    async fn mutable(&self, scope: &Scope, workload: &str) -> Result<App, String> {
+        scope.check(workload)?;
         let app = self.app().await?;
         let env = app.workload_get(workload).await.map_err(err)?.env;
         app.mcp_check_mutate(&env).map_err(err)?;
@@ -213,19 +309,30 @@ impl IkitServer {
     #[tool(
         description = "List the org's workloads with env, target and status (draft, applied, failed)."
     )]
-    async fn workload_list(&self, Parameters(args): Parameters<WorkloadListArgs>) -> ToolResult {
+    async fn workload_list(
+        &self,
+        Parameters(args): Parameters<WorkloadListArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let scope = self.scope(&ext);
         let app = self.app().await?;
-        json(
-            &app.workload_list(args.env.as_deref())
-                .await
-                .map_err(|e| e.to_string())?,
-        )
+        let mut workloads = app
+            .workload_list(args.env.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        workloads.retain(|w| scope.allows(&w.name));
+        json(&workloads)
     }
 
     #[tool(
         description = "Show a workload: target, status and its services with versions, images, env (secret values are never included) and published ports."
     )]
-    async fn workload_show(&self, Parameters(args): Parameters<WorkloadArgs>) -> ToolResult {
+    async fn workload_show(
+        &self,
+        Parameters(args): Parameters<WorkloadArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         let detail = app
             .workload_show(&args.workload)
@@ -239,11 +346,24 @@ impl IkitServer {
     }
 
     #[tool(
-        description = "List targets (VMs and Kubernetes clusters) with their connection and last test result."
+        description = "List targets (VMs and Kubernetes clusters) with their connection and last test result. A client limited to some workloads sees only their targets."
     )]
-    async fn target_list(&self) -> ToolResult {
+    async fn target_list(&self, ext: Extensions) -> ToolResult {
+        let scope = self.scope(&ext);
         let app = self.app().await?;
-        json(&app.target_list().await.map_err(|e| e.to_string())?)
+        let mut targets = app.target_list().await.map_err(|e| e.to_string())?;
+        if scope != Scope::org() {
+            let used: BTreeSet<String> = app
+                .workload_list(None)
+                .await
+                .map_err(err)?
+                .into_iter()
+                .filter(|w| scope.allows(&w.name))
+                .map(|w| w.target)
+                .collect();
+            targets.retain(|t| used.contains(&t.name));
+        }
+        json(&targets)
     }
 
     #[tool(
@@ -270,23 +390,34 @@ impl IkitServer {
     #[tool(
         description = "Show one registry service with every version's image, ports, env schema and dependencies."
     )]
-    async fn registry_show(&self, Parameters(args): Parameters<NameArgs>) -> ToolResult {
+    async fn registry_show(
+        &self,
+        Parameters(args): Parameters<NameArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let scope = self.scope(&ext);
         let app = self.app().await?;
         let entry = app
             .registry_show(&args.name)
             .await
             .map_err(|e| e.to_string())?;
-        let usage = app
+        let mut usage = app
             .registry_usage(&args.name)
             .await
             .map_err(|e| e.to_string())?;
+        usage.retain(|u| scope.allows(&u.workload));
         json(&serde_json::json!({ "service": entry, "used_by": usage }))
     }
 
     #[tool(
         description = "Show what `ikit apply` would change for a workload on its target (added, removed and updated services). Read-only: nothing is applied. Secret values are never shown, only which secret keys changed."
     )]
-    async fn deploy_plan(&self, Parameters(args): Parameters<WorkloadArgs>) -> ToolResult {
+    async fn deploy_plan(
+        &self,
+        Parameters(args): Parameters<WorkloadArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         let plan = app
             .deploy_plan(&args.workload)
@@ -308,7 +439,12 @@ impl IkitServer {
     #[tool(
         description = "Show a workload's containers on its target: state, health and published ports."
     )]
-    async fn deploy_status(&self, Parameters(args): Parameters<WorkloadArgs>) -> ToolResult {
+    async fn deploy_status(
+        &self,
+        Parameters(args): Parameters<WorkloadArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         json(
             &app.deploy_status(&args.workload)
@@ -321,11 +457,29 @@ impl IkitServer {
         description = "Compare a workload's running containers with the files last applied: missing, stopped, unhealthy, \
                        hand-modified and extra containers. Omit workload to check every applied workload."
     )]
-    async fn deploy_drift(&self, Parameters(args): Parameters<OptionalWorkloadArgs>) -> ToolResult {
+    async fn deploy_drift(
+        &self,
+        Parameters(args): Parameters<OptionalWorkloadArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let scope = self.scope(&ext);
         let app = self.app().await?;
         match args.workload {
-            Some(w) => json(&app.deploy_drift(&w).await.map_err(err)?),
-            None => json(&app.deploy_drift_all().await.map_err(err)?),
+            Some(w) => {
+                scope.check(&w)?;
+                json(&app.deploy_drift(&w).await.map_err(err)?)
+            }
+            None if scope == Scope::org() => json(&app.deploy_drift_all().await.map_err(err)?),
+            None => {
+                // Only the workloads in scope, so other targets are not contacted.
+                let mut reports = Vec::new();
+                for wl in app.workload_list(None).await.map_err(err)? {
+                    if scope.allows(&wl.name) && wl.status != ikit_core::WorkloadStatus::Draft {
+                        reports.push(app.deploy_drift(&wl.name).await.map_err(err)?);
+                    }
+                }
+                json(&reports)
+            }
         }
     }
 
@@ -336,19 +490,30 @@ impl IkitServer {
     async fn registry_outdated(
         &self,
         Parameters(args): Parameters<OptionalWorkloadArgs>,
+        ext: Extensions,
     ) -> ToolResult {
+        let scope = self.scope(&ext);
+        if let Some(w) = &args.workload {
+            scope.check(w)?;
+        }
         let app = self.app().await?;
-        json(
-            &app.registry_outdated(args.workload.as_deref())
-                .await
-                .map_err(err)?,
-        )
+        let mut outdated = app
+            .registry_outdated(args.workload.as_deref())
+            .await
+            .map_err(err)?;
+        outdated.retain(|o| scope.allows(&o.workload));
+        json(&outdated)
     }
 
     #[tool(
         description = "Show a workload's apply and destroy history, newest first, with who ran them and any error."
     )]
-    async fn workload_runs(&self, Parameters(args): Parameters<RunsArgs>) -> ToolResult {
+    async fn workload_runs(
+        &self,
+        Parameters(args): Parameters<RunsArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         json(
             &app.workload_runs(&args.workload, args.limit.unwrap_or(20))
@@ -366,7 +531,9 @@ impl IkitServer {
     async fn workload_create(
         &self,
         Parameters(args): Parameters<WorkloadCreateArgs>,
+        ext: Extensions,
     ) -> ToolResult {
+        self.scope(&ext).check_org("workload_create")?;
         let app = self.app().await?;
         app.mcp_check_mutate(&args.env).map_err(err)?;
         json(
@@ -379,8 +546,12 @@ impl IkitServer {
     #[tool(
         description = "Add registry services to a workload's group (app, platform or data). Non-secret env only; services that require a secret must be added with the CLI. Needs `mutate` in mcp.yaml. Does not deploy."
     )]
-    async fn service_add(&self, Parameters(args): Parameters<ServiceAddArgs>) -> ToolResult {
-        let app = self.mutable(&args.workload).await?;
+    async fn service_add(
+        &self,
+        Parameters(args): Parameters<ServiceAddArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
         let group = args
             .group
             .parse()
@@ -420,8 +591,12 @@ impl IkitServer {
     #[tool(
         description = "Set or unset non-secret env values on a service. Needs `mutate` in mcp.yaml. Takes effect on the next apply."
     )]
-    async fn service_set_env(&self, Parameters(args): Parameters<ServiceSetEnvArgs>) -> ToolResult {
-        let app = self.mutable(&args.workload).await?;
+    async fn service_set_env(
+        &self,
+        Parameters(args): Parameters<ServiceSetEnvArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
         let (_, version) = app
             .service_show(&args.workload, &args.service)
             .await
@@ -446,8 +621,9 @@ impl IkitServer {
     async fn service_publish(
         &self,
         Parameters(args): Parameters<ServicePublishArgs>,
+        ext: Extensions,
     ) -> ToolResult {
-        let app = self.mutable(&args.workload).await?;
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
         let add = args
             .add
             .iter()
@@ -463,8 +639,12 @@ impl IkitServer {
     #[tool(
         description = "Add a SQL hook: scripts from a local file or folder run once each in a database service after every apply. Needs `mutate` in mcp.yaml."
     )]
-    async fn hook_add_sql(&self, Parameters(args): Parameters<SqlHookAddArgs>) -> ToolResult {
-        let app = self.mutable(&args.workload).await?;
+    async fn hook_add_sql(
+        &self,
+        Parameters(args): Parameters<SqlHookAddArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
         let req = ikit_app::NewHookRequest {
             name: args.name,
             phase: ikit_core::HookPhase::PostApply,
@@ -481,7 +661,12 @@ impl IkitServer {
     }
 
     #[tool(description = "List a workload's hooks (SQL, shell, HTTP) and when they run.")]
-    async fn hook_list(&self, Parameters(args): Parameters<WorkloadArgs>) -> ToolResult {
+    async fn hook_list(
+        &self,
+        Parameters(args): Parameters<WorkloadArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         json(&app.hook_list(&args.workload).await.map_err(err)?)
     }
@@ -507,7 +692,12 @@ impl IkitServer {
     #[tool(
         description = "Apply a plan from deploy_plan to the workload's target (docker compose up and hooks). Pass the plan_id you were shown; if anything changed since, it is refused. Needs `deploy` for the env in the org's mcp.yaml."
     )]
-    async fn deploy_apply(&self, Parameters(args): Parameters<DeployApplyArgs>) -> ToolResult {
+    async fn deploy_apply(
+        &self,
+        Parameters(args): Parameters<DeployApplyArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         let env = app.workload_get(&args.workload).await.map_err(err)?.env;
         app.mcp_check_deploy(&env).map_err(err)?;
@@ -534,7 +724,12 @@ impl IkitServer {
     #[tool(
         description = "Stop and remove a workload's containers (volumes and data are always kept). The first call returns a confirmation token; after the user approves, call again with `confirm` set to it within 5 minutes. Needs `deploy` for the env in the org's mcp.yaml."
     )]
-    async fn deploy_destroy(&self, Parameters(args): Parameters<DeployDestroyArgs>) -> ToolResult {
+    async fn deploy_destroy(
+        &self,
+        Parameters(args): Parameters<DeployDestroyArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
         let app = self.app().await?;
         let env = app.workload_get(&args.workload).await.map_err(err)?.env;
         app.mcp_check_deploy(&env).map_err(err)?;
@@ -583,12 +778,20 @@ pub struct ZtAuthorizeArgs {
 #[tool_router(router = zt_router)]
 impl IkitServer {
     #[tool(
-        description = "List the org's ZeroTier networks with their linked workloads and members (node ID, name, authorized, online, addresses)."
+        description = "List the org's ZeroTier networks with their linked workloads and members (node ID, name, authorized, online, addresses). A client limited to some workloads sees only their networks."
     )]
-    async fn zt_status(&self) -> ToolResult {
+    async fn zt_status(&self, ext: Extensions) -> ToolResult {
+        let scope = self.scope(&ext);
         let app = self.app().await?;
         let mut out = Vec::new();
-        for network in app.zt_list().await.map_err(err)? {
+        for mut network in app.zt_list().await.map_err(err)? {
+            if scope != Scope::org() {
+                network.workloads.retain(|w| scope.allows(w));
+                network.sidecars.retain(|w| scope.allows(w));
+                if network.workloads.is_empty() {
+                    continue;
+                }
+            }
             let members = app.zt_members(&network.name).await;
             out.push(match members {
                 Ok(m) => serde_json::json!({ "network": network, "members": m }),
@@ -601,7 +804,12 @@ impl IkitServer {
     #[tool(
         description = "Authorize (or revoke with authorized=false) a node on one of the org's ZeroTier networks. Needs `zt_authorize: true` in the org's mcp.yaml."
     )]
-    async fn zt_authorize(&self, Parameters(args): Parameters<ZtAuthorizeArgs>) -> ToolResult {
+    async fn zt_authorize(
+        &self,
+        Parameters(args): Parameters<ZtAuthorizeArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check_org("zt_authorize")?;
         let app = self.app().await?;
         app.mcp_check_zt_authorize().map_err(err)?;
         json(
@@ -710,18 +918,27 @@ impl ServerHandler for IkitServer {
                 "Access to ikit org `{}`: workloads, targets, the service registry, hooks, deploy plans, container \
                  status, run history and ZeroTier networks. Tools that change definitions or deploy only work where the org's mcp.yaml \
                  allows them; deploy_apply needs the plan_id from deploy_plan, and deploy_destroy needs a \
-                 confirmation token the user must approve. Secret values are never returned and cannot be set.",
-                self.org
+                 confirmation token the user must approve. Secret values are never returned and cannot be set.{}",
+                self.org,
+                match &self.scope.0 {
+                    None => String::new(),
+                    Some(names) => format!(
+                        " This server only reaches the workloads {}; tools for the whole org are refused.",
+                        names.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                }
             ))
     }
 }
 
-/// Serves `org` over stdin/stdout until the client disconnects.
+/// Serves `org`, limited to `scope`, over stdin/stdout until the client disconnects.
 pub async fn serve_stdio(
     paths: Paths,
     org: String,
+    scope: Scope,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service = IkitServer::new(paths, org)
+        .with_scope(scope)
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;
@@ -729,10 +946,12 @@ pub async fn serve_stdio(
 }
 
 /// Serves `org` over streamable HTTP at `http://<addr>/mcp` until Ctrl-C. Every request
-/// needs `Authorization: Bearer <token>` with a token from `ikit mcp token create`.
+/// needs `Authorization: Bearer <token>` with a token from `ikit mcp token create`, and
+/// reaches what both `scope` and the token's workloads allow.
 pub async fn serve_http(
     paths: Paths,
     org: String,
+    scope: Scope,
     addr: std::net::SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -741,7 +960,8 @@ pub async fn serve_http(
     let org_paths = paths.org(&org);
     // One server shared by every session, so plan IDs and destroy tokens issued in one
     // request are honored in the next (stateless clients get a new session per request).
-    let server = IkitServer::new(paths, org);
+    let mut server = IkitServer::new(paths, org).with_scope(scope);
+    server.token_scoped = true;
     let ip = addr.ip();
     let mut hosts = vec![ip.to_string(), format!("[{ip}]"), addr.to_string()];
     if ip.is_loopback() {
@@ -767,10 +987,11 @@ pub async fn serve_http(
     Ok(())
 }
 
-/// Rejects requests without a valid bearer token with 401.
+/// Rejects requests without a valid bearer token with 401, and passes the token's [`Scope`]
+/// on to the tools.
 async fn require_token(
     axum::extract::State(org): axum::extract::State<ikit_app::OrgPaths>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
@@ -783,8 +1004,9 @@ async fn require_token(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim);
     match presented.map(|t| ikit_app::mcp_token_verify(&org, t)) {
-        Some(Ok(Some(name))) => {
-            tracing::info!(token = %name, method = %req.method(), "mcp http request");
+        Some(Ok(Some(token))) => {
+            tracing::info!(token = %token.name, method = %req.method(), "mcp http request");
+            req.extensions_mut().insert(Scope::of_token(&token));
             next.run(req).await
         }
         Some(Err(e)) => {
@@ -859,7 +1081,10 @@ mod tests {
     async fn tools_report_errors_as_text() {
         let server = IkitServer::new(Paths::new("/nonexistent"), "acme".into());
         let err = server
-            .workload_list(Parameters(WorkloadListArgs { env: None }))
+            .workload_list(
+                Parameters(WorkloadListArgs { env: None }),
+                Extensions::default(),
+            )
             .await
             .unwrap_err();
         assert!(err.contains("org `acme`"), "{err}");
@@ -890,7 +1115,7 @@ mod tests {
             target: "laptop".into(),
         };
         let e = server
-            .workload_create(Parameters(create()))
+            .workload_create(Parameters(create()), Extensions::default())
             .await
             .unwrap_err();
         assert!(e.contains("mutate"), "{e}");
@@ -900,14 +1125,20 @@ mod tests {
             "mutate: true\nmutate_envs: [dev]\n",
         )
         .unwrap();
-        server.workload_create(Parameters(create())).await.unwrap();
+        server
+            .workload_create(Parameters(create()), Extensions::default())
+            .await
+            .unwrap();
         let add = ServiceAddArgs {
             workload: "wl-acme-dev-001".into(),
             group: "data".into(),
             services: vec!["redis@7".into()],
             env: BTreeMap::new(),
         };
-        server.service_add(Parameters(add)).await.unwrap();
+        server
+            .service_add(Parameters(add), Extensions::default())
+            .await
+            .unwrap();
         let secret = ServiceAddArgs {
             workload: "wl-acme-dev-001".into(),
             group: "data".into(),
@@ -917,7 +1148,10 @@ mod tests {
                 BTreeMap::from([("POSTGRES_PASSWORD".into(), "x".into())]),
             )]),
         };
-        let e = server.service_add(Parameters(secret)).await.unwrap_err();
+        let e = server
+            .service_add(Parameters(secret), Extensions::default())
+            .await
+            .unwrap_err();
         assert!(e.contains("secret"), "{e}");
 
         let prod = WorkloadCreateArgs {
@@ -925,8 +1159,181 @@ mod tests {
             target: "laptop".into(),
         };
         assert!(
-            server.workload_create(Parameters(prod)).await.is_err(),
+            server
+                .workload_create(Parameters(prod), Extensions::default())
+                .await
+                .is_err(),
             "prod is not in mutate_envs"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Extensions as the HTTP transport delivers them for a request whose token has `scope`.
+    fn token_request(scope: Scope) -> Extensions {
+        let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+        parts.extensions.insert(scope);
+        let mut ext = Extensions::default();
+        ext.insert(parts);
+        ext
+    }
+
+    #[tokio::test]
+    async fn scoped_clients_only_reach_their_workloads() {
+        let dir = std::env::temp_dir().join(format!("ikit-mcp-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = Paths::new(&dir);
+        ikit_app::org_create(
+            &paths,
+            ikit_app::NewOrg {
+                name: "acme".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        std::fs::write(
+            paths.org("acme").mcp_config_file(),
+            "mutate: true\nmutate_envs: [dev]\ndeploy: true\ndeploy_envs: [dev]\n",
+        )
+        .unwrap();
+        let org = IkitServer::new(paths.clone(), "acme".into());
+        let app = org.app().await.unwrap();
+        app.target_attach("laptop", ikit_core::Connection::Local)
+            .await
+            .unwrap();
+        app.target_attach("edge", ikit_core::Connection::Local)
+            .await
+            .unwrap();
+        app.workload_create("dev", "laptop").await.unwrap();
+        app.workload_create("dev", "edge").await.unwrap();
+        let (one, two) = ("wl-acme-dev-001", "wl-acme-dev-002");
+        let none = Extensions::default;
+        let redis = |workload: &str| ServiceAddArgs {
+            workload: workload.into(),
+            group: "data".into(),
+            services: vec!["redis@7".into()],
+            env: BTreeMap::new(),
+        };
+        org.service_add(Parameters(redis(two)), none())
+            .await
+            .unwrap();
+
+        let server = org.clone().with_scope(Scope::workloads([one.to_owned()]));
+        let names = |out: String| -> Vec<String> {
+            serde_json::from_str::<Vec<serde_json::Value>>(&out)
+                .unwrap()
+                .iter()
+                .map(|v| v["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let listed = server
+            .workload_list(Parameters(WorkloadListArgs { env: None }), none())
+            .await
+            .unwrap();
+        assert_eq!(names(listed), [one]);
+        let targets = server.target_list(none()).await.unwrap();
+        assert_eq!(names(targets), ["laptop"]);
+
+        // Out of scope reads exactly like missing.
+        let show = |w: &str| WorkloadArgs { workload: w.into() };
+        let hidden = server
+            .workload_show(Parameters(show(two)), none())
+            .await
+            .unwrap_err();
+        assert_eq!(hidden, "workload `wl-acme-dev-002` not found");
+        let e = org
+            .workload_show(Parameters(show("wl-acme-dev-009")), none())
+            .await
+            .unwrap_err();
+        assert_eq!(e, "workload `wl-acme-dev-009` not found");
+
+        let e = server
+            .service_add(Parameters(redis(two)), none())
+            .await
+            .unwrap_err();
+        assert!(e.contains("not found"), "{e}");
+        server
+            .service_add(Parameters(redis(one)), none())
+            .await
+            .unwrap();
+        let destroy = DeployDestroyArgs {
+            workload: two.into(),
+            confirm: None,
+        };
+        let e = server
+            .deploy_destroy(Parameters(destroy), none())
+            .await
+            .unwrap_err();
+        assert!(e.contains("not found"), "{e}");
+
+        let used: serde_json::Value = serde_json::from_str(
+            &server
+                .registry_show(
+                    Parameters(NameArgs {
+                        name: "redis".into(),
+                    }),
+                    none(),
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let used_by: Vec<&str> = used["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["workload"].as_str().unwrap())
+            .collect();
+        assert_eq!(used_by, [one]);
+
+        let create = WorkloadCreateArgs {
+            env: "dev".into(),
+            target: "laptop".into(),
+        };
+        let e = server
+            .workload_create(Parameters(create), none())
+            .await
+            .unwrap_err();
+        assert!(e.contains("whole org") && e.contains(one), "{e}");
+        let zt = ZtAuthorizeArgs {
+            network: "dev-net".into(),
+            node: "a1b2c3d4e5".into(),
+            authorized: true,
+            name: None,
+        };
+        let e = server
+            .zt_authorize(Parameters(zt), none())
+            .await
+            .unwrap_err();
+        assert!(e.contains("whole org"), "{e}");
+        assert!(server.get_info().instructions.unwrap().contains(one));
+
+        // Over HTTP, the token narrows the server's scope, and no token reaches nothing.
+        let mut http = org.clone();
+        http.token_scoped = true;
+        let list = |s: &IkitServer, ext: Extensions| {
+            let s = s.clone();
+            async move {
+                names(
+                    s.workload_list(Parameters(WorkloadListArgs { env: None }), ext)
+                        .await
+                        .unwrap(),
+                )
+            }
+        };
+        assert_eq!(list(&http, token_request(Scope::org())).await, [one, two]);
+        assert_eq!(
+            list(&http, token_request(Scope::workloads([two.to_owned()]))).await,
+            [two]
+        );
+        assert!(list(&http, none()).await.is_empty(), "fails closed");
+        let mut both = server.clone();
+        both.token_scoped = true;
+        assert!(
+            list(&both, token_request(Scope::workloads([two.to_owned()])))
+                .await
+                .is_empty(),
+            "server and token scopes intersect"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -957,7 +1364,7 @@ mod tests {
             plan_id: id.into(),
         };
         let e = server
-            .deploy_apply(Parameters(apply("x")))
+            .deploy_apply(Parameters(apply("x")), Extensions::default())
             .await
             .unwrap_err();
         assert!(e.contains("deploy_envs"), "{e}");
@@ -968,7 +1375,7 @@ mod tests {
         )
         .unwrap();
         let e = server
-            .deploy_apply(Parameters(apply("wrong")))
+            .deploy_apply(Parameters(apply("wrong")), Extensions::default())
             .await
             .unwrap_err();
         assert!(
@@ -983,7 +1390,7 @@ mod tests {
         };
         let first: serde_json::Value = serde_json::from_str(
             &server
-                .deploy_destroy(Parameters(destroy(None)))
+                .deploy_destroy(Parameters(destroy(None)), Extensions::default())
                 .await
                 .unwrap(),
         )
@@ -991,13 +1398,13 @@ mod tests {
         let token = first["confirm_with"].as_str().unwrap().to_owned();
         assert!(
             server
-                .deploy_destroy(Parameters(destroy(Some("bogus"))))
+                .deploy_destroy(Parameters(destroy(Some("bogus"))), Extensions::default())
                 .await
                 .is_err()
         );
         let done: serde_json::Value = serde_json::from_str(
             &server
-                .deploy_destroy(Parameters(destroy(Some(&token))))
+                .deploy_destroy(Parameters(destroy(Some(&token))), Extensions::default())
                 .await
                 .unwrap(),
         )
@@ -1010,12 +1417,15 @@ mod tests {
             authorized: true,
             name: None,
         };
-        let e = server.zt_authorize(Parameters(zt)).await.unwrap_err();
+        let e = server
+            .zt_authorize(Parameters(zt), Extensions::default())
+            .await
+            .unwrap_err();
         assert!(e.contains("zt_authorize: true"), "{e}");
-        assert_eq!(server.zt_status().await.unwrap(), "[]");
+        assert_eq!(server.zt_status(Extensions::default()).await.unwrap(), "[]");
         assert!(
             server
-                .deploy_destroy(Parameters(destroy(Some(&token))))
+                .deploy_destroy(Parameters(destroy(Some(&token))), Extensions::default())
                 .await
                 .is_err(),
             "token is single-use"

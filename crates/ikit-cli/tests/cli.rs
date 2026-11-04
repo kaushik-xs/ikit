@@ -167,6 +167,27 @@ fn mcp_http_tokens_and_networks_offline() {
     ikit.ok(&["mcp", "token", "rm", "agent"]);
     assert!(!ikit.run(&["mcp", "token", "rm", "agent"]).status.success());
 
+    // Tokens limited to workloads, which must exist.
+    let wl = ikit.wl();
+    let out = ikit.run(&["mcp", "token", "create", "ci", "--workload", &wl]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not found"));
+    ikit.ok(&["target", "attach", "vm", "laptop", "--local"]);
+    ikit.ok(&["wl", "create", "--env", "dev", "--target", "laptop"]);
+    let created = ikit.json(&["mcp", "token", "create", "ci", "--workload", &wl]);
+    assert_eq!(created["workloads"], serde_json::json!([wl]));
+    assert_eq!(
+        ikit.json(&["mcp", "token", "list"])[0]["workloads"],
+        serde_json::json!([wl])
+    );
+    let out = ikit.run(&["mcp", "token", "create", "x", "--wl", &wl]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--workload NAME"));
+    let shown = ikit.ok(&["mcp", "install", "claude", "--dry-run", "--workload", &wl]);
+    assert!(
+        shown.contains(&format!("ikit-{wl} ")) && shown.ends_with(&format!("--workload {wl}\n")),
+        "{shown}"
+    );
+    ikit.ok(&["mcp", "token", "rm", "ci"]);
+
     assert_eq!(ikit.json(&["net", "zt", "list"]), serde_json::json!([]));
     let out = ikit.run(&[
         "net",
