@@ -527,6 +527,7 @@ impl IkitServer {
             "run_id": report.run_id,
             "containers": report.containers,
             "hooks_ran": report.hooks_ran,
+            "zerotier": report.zerotier,
         }))
     }
 

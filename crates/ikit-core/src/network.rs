@@ -20,5 +20,7 @@ pub struct Network {
     pub cidr: Option<String>,
     /// Workloads linked to this network.
     pub workloads: Vec<String>,
+    /// The linked workloads that run a ZeroTier sidecar container.
+    pub sidecars: Vec<String>,
     pub created_at: DateTime<Utc>,
 }

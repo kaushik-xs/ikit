@@ -21,7 +21,24 @@ pub struct WorkloadInput {
     pub org: String,
     pub workload: String,
     pub services: Vec<ServiceInput>,
+    /// The ZeroTier network a sidecar container joins, if the workload runs one.
+    pub zerotier: Option<ZtSidecar>,
 }
+
+/// A ZeroTier container on the host network that joins the target to a network, so the
+/// workload's published ports are reachable at the target's ZeroTier address.
+#[derive(Debug, Clone)]
+pub struct ZtSidecar {
+    /// The 16-digit network ID.
+    pub network_id: String,
+}
+
+/// The sidecar's compose service name; no service instance may use it.
+pub const ZT_SIDECAR: &str = "ikit-zerotier";
+/// The sidecar image.
+pub const ZT_SIDECAR_IMAGE: &str = "zerotier/zerotier:1.14.2";
+/// Where the sidecar keeps its node identity, in a named volume so it survives recreates.
+const ZT_HOME: &str = "/var/lib/zerotier-one";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
@@ -44,6 +61,8 @@ pub enum RenderError {
     },
     #[error("workload `{0}` has no services to deploy (add some with `ikit sg add`)")]
     Empty(String),
+    #[error("service name `{0}` is reserved for the ZeroTier sidecar; rename the service")]
+    Reserved(String),
 }
 
 #[derive(Serialize)]
@@ -58,6 +77,14 @@ struct ComposeFile {
 struct ComposeService {
     image: String,
     restart: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cap_add: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<&'static str>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     environment: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -351,6 +378,10 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                     _ => inst.image.clone(),
                 },
                 restart: "unless-stopped",
+                command: vec![],
+                network_mode: None,
+                cap_add: vec![],
+                devices: vec![],
                 environment,
                 ports,
                 volumes: mounts,
@@ -358,6 +389,37 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                 depends_on,
                 deploy,
                 labels,
+            },
+        );
+    }
+
+    if let Some(zt) = &input.zerotier {
+        if services.contains_key(ZT_SIDECAR) {
+            return Err(RenderError::Reserved(ZT_SIDECAR.to_owned()));
+        }
+        volumes.insert(ZT_SIDECAR.to_owned(), BTreeMap::new());
+        images.push(ZT_SIDECAR_IMAGE.to_owned());
+        services.insert(
+            ZT_SIDECAR.to_owned(),
+            ComposeService {
+                image: ZT_SIDECAR_IMAGE.to_owned(),
+                restart: "unless-stopped",
+                // The image's entrypoint joins the networks it is given.
+                command: vec![zt.network_id.clone()],
+                network_mode: Some("host"),
+                cap_add: vec!["NET_ADMIN", "SYS_ADMIN"],
+                devices: vec!["/dev/net/tun"],
+                environment: BTreeMap::new(),
+                ports: vec![],
+                volumes: vec![format!("{ZT_SIDECAR}:{ZT_HOME}")],
+                healthcheck: None,
+                depends_on: BTreeMap::new(),
+                deploy: None,
+                labels: BTreeMap::from([
+                    ("ikit.org".to_owned(), input.org.clone()),
+                    ("ikit.workload".to_owned(), input.workload.clone()),
+                    ("ikit.service".to_owned(), ZT_SIDECAR.to_owned()),
+                ]),
             },
         );
     }
@@ -515,6 +577,7 @@ pub(crate) mod tests {
                     secrets: BTreeMap::new(),
                 },
             ],
+            zerotier: None,
         }
     }
 
@@ -588,6 +651,32 @@ pub(crate) mod tests {
         assert_eq!(
             c["services"]["postgres"]["image"],
             "postgres:16.6@sha256:abc"
+        );
+    }
+
+    #[test]
+    fn zerotier_sidecar_joins_on_the_host_network() {
+        let mut input = sample();
+        input.zerotier = Some(ZtSidecar {
+            network_id: "8056c2e21c000001".into(),
+        });
+        let r = render(&input).unwrap();
+        let c = yaml(&r.compose);
+        let zt = &c["services"][ZT_SIDECAR];
+        assert_eq!(zt["image"], ZT_SIDECAR_IMAGE);
+        assert_eq!(zt["command"][0], "8056c2e21c000001");
+        assert_eq!(zt["network_mode"], "host");
+        assert_eq!(zt["devices"][0], "/dev/net/tun");
+        assert_eq!(zt["volumes"][0], "ikit-zerotier:/var/lib/zerotier-one");
+        assert!(c["volumes"].get(ZT_SIDECAR).is_some());
+        assert!(r.images.contains(&ZT_SIDECAR_IMAGE.to_owned()));
+        // Other services are unchanged.
+        assert!(c["services"]["postgres"].get("network_mode").is_none());
+
+        input.services[0].instance.name = ZT_SIDECAR.into();
+        assert_eq!(
+            render(&input).unwrap_err(),
+            RenderError::Reserved(ZT_SIDECAR.into())
         );
     }
 

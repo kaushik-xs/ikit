@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE workload_networks SET sidecar = ? WHERE workload_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8fccf548f7e02d79261cd6b29f4ca07f3e3bf402021ee2f24ad5bcb826489dc2"
+}

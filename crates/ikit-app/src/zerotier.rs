@@ -19,6 +19,10 @@ const DEFAULT_API: &str = "https://api.zerotier.com/api/v1";
 
 const ZT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long to wait for Central to assign an authorized member an address.
+const ADDRESS_ATTEMPTS: u32 = 10;
+const ADDRESS_INTERVAL: Duration = Duration::from_secs(2);
+
 /// The ZeroTier node on a machine and the networks it joined.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ZtNode {
@@ -284,7 +288,7 @@ impl App {
             })
             .await?;
         if let Some(wl) = wl {
-            self.store.networks().link(wl.id, network.id).await?;
+            self.store.networks().link(wl.id, network.id, false).await?;
         }
         self.zt_show_network(name).await
     }
@@ -321,7 +325,7 @@ impl App {
             })
             .await?;
         if let Some(wl) = wl {
-            self.store.networks().link(wl.id, network.id).await?;
+            self.store.networks().link(wl.id, network.id, false).await?;
         }
         self.zt_show_network(name).await
     }
@@ -441,12 +445,32 @@ impl App {
         Ok(info.address)
     }
 
-    /// Links `workload` to the network, replacing the network it was linked to.
-    pub async fn zt_link(&self, name: &str, workload: &str) -> Result<Network> {
+    /// Links `workload` to the network, replacing the network it was linked to. With
+    /// `sidecar`, the workload's compose file gets a ZeroTier container that joins it.
+    pub async fn zt_link(&self, name: &str, workload: &str, sidecar: bool) -> Result<Network> {
         let network = self.zt_show_network(name).await?;
         let wl = self.workload_get(workload).await?;
-        self.store.networks().link(wl.id, network.id).await?;
+        self.store
+            .networks()
+            .link(wl.id, network.id, sidecar)
+            .await?;
         self.zt_show_network(name).await
+    }
+
+    /// Turns the ZeroTier sidecar of a linked workload on or off; it takes effect on the
+    /// next apply.
+    pub async fn zt_sidecar(&self, workload: &str, enabled: bool) -> Result<Network> {
+        let wl = self.workload_get(workload).await?;
+        if !self.store.networks().set_sidecar(wl.id, enabled).await? {
+            return Err(AppError::NotFound(format!(
+                "a network linked to {workload} (link one with `ikit net zt link <network>`)"
+            )));
+        }
+        self.store
+            .networks()
+            .for_workload(wl.id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("a network linked to {workload}")))
     }
 
     pub async fn zt_unlink(&self, workload: &str) -> Result<()> {
@@ -475,6 +499,19 @@ impl App {
                 by: network.workloads,
             });
         }
+        let routed: Vec<String> = self
+            .target_list()
+            .await?
+            .into_iter()
+            .filter(|t| zt_route(t).is_some_and(|r| r.network == name))
+            .map(|t| format!("target {}", t.name))
+            .collect();
+        if !routed.is_empty() {
+            return Err(AppError::InUse {
+                what: format!("network `{name}`"),
+                by: routed,
+            });
+        }
         if delete && network.origin != NetworkOrigin::Created {
             return Err(AppError::Invalid(format!(
                 "network `{name}` was attached, not created by ikit; delete it in ZeroTier Central instead"
@@ -489,6 +526,65 @@ impl App {
         }
         self.store.networks().delete(name).await?;
         Ok(())
+    }
+}
+
+impl App {
+    /// The member for `node` in Central, if it exists.
+    pub(crate) async fn zt_member(&self, network: &Network, node: &str) -> Result<Option<Member>> {
+        let central = self.central(&network.profile).await?;
+        let members = central.members(&network.network_id).await.map_err(net)?;
+        Ok(members.into_iter().find(|m| m.node_id == node))
+    }
+
+    /// Authorizes `node` on `network`, named `member_name`, and waits for Central to assign
+    /// it an address. Returns the member and that address.
+    pub(crate) async fn zt_authorize_with_address(
+        &self,
+        network: &Network,
+        node: &str,
+        member_name: &str,
+    ) -> Result<(Member, IpAddr)> {
+        check_node(node)?;
+        let central = self.central(&network.profile).await?;
+        let mut member = central
+            .update_member(&network.network_id, node, Some(true), Some(member_name))
+            .await
+            .map_err(net)?;
+        for attempt in 0..ADDRESS_ATTEMPTS {
+            if let Some(ip) = member_address(&member) {
+                return Ok((member, ip));
+            }
+            if attempt + 1 < ADDRESS_ATTEMPTS {
+                tokio::time::sleep(ADDRESS_INTERVAL).await;
+            }
+            let members = central.members(&network.network_id).await.map_err(net)?;
+            if let Some(m) = members.into_iter().find(|m| m.node_id == node) {
+                member = m;
+            }
+        }
+        Err(AppError::Invalid(format!(
+            "node {node} is authorized on `{}` but ZeroTier Central assigned it no address; \
+             check the network has an address pool (`ikit net zt show {}`)",
+            network.name, network.name
+        )))
+    }
+}
+
+/// The address ikit uses for a member: its first IPv4 assignment, else its first address.
+pub(crate) fn member_address(m: &Member) -> Option<IpAddr> {
+    let ips: Vec<IpAddr> = m.ips.iter().filter_map(|a| a.parse().ok()).collect();
+    ips.iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| ips.first())
+        .copied()
+}
+
+/// The ZeroTier route of an SSH target, if it has one.
+pub(crate) fn zt_route(t: &Target) -> Option<&ikit_core::ZtRoute> {
+    match &t.connection {
+        Connection::Ssh { zerotier, .. } => zerotier.as_ref(),
+        _ => None,
     }
 }
 
@@ -535,108 +631,11 @@ mod tests {
         }
     }
 
-    /// An in-memory ZeroTier Central: one network ID per create, members by node ID.
-    async fn fake_central() -> String {
-        use axum::extract::{Path, State};
-        use axum::http::{HeaderMap, StatusCode};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
-        use serde_json::{Value, json};
-
-        #[derive(Default)]
-        struct Db {
-            networks: std::collections::BTreeMap<String, Value>,
-            members: std::collections::BTreeMap<(String, String), Value>,
-        }
-        type Shared = Arc<Mutex<Db>>;
-
-        fn authed(h: &HeaderMap) -> Result<(), StatusCode> {
-            (h.get("authorization").and_then(|v| v.to_str().ok()) == Some("token secret"))
-                .then_some(())
-                .ok_or(StatusCode::UNAUTHORIZED)
-        }
-
-        let app = Router::new()
-            .route(
-                "/network",
-                post(|State(db): State<Shared>, h: HeaderMap, Json(body): Json<Value>| async move {
-                    authed(&h)?;
-                    let mut db = db.lock().unwrap();
-                    let id = format!("8056c2e21c{:06x}", db.networks.len() + 1);
-                    let net = json!({ "id": id, "config": body["config"] });
-                    db.networks.insert(id, net.clone());
-                    Ok::<_, StatusCode>(Json(net))
-                }),
-            )
-            .route(
-                "/network/{id}",
-                get(|State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
-                    authed(&h)?;
-                    db.lock().unwrap().networks.get(&id).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
-                })
-                .delete(|State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
-                    authed(&h)?;
-                    db.lock().unwrap().networks.remove(&id).map(|_| Json(json!({}))).ok_or(StatusCode::NOT_FOUND)
-                }),
-            )
-            .route(
-                "/network/{id}/member",
-                get(|State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
-                    authed(&h)?;
-                    let db = db.lock().unwrap();
-                    let members: Vec<Value> =
-                        db.members.iter().filter(|((n, _), _)| *n == id).map(|(_, m)| m.clone()).collect();
-                    Ok::<_, StatusCode>(Json(members))
-                }),
-            )
-            .route(
-                "/network/{id}/member/{node}",
-                post(
-                    |State(db): State<Shared>,
-                     h: HeaderMap,
-                     Path((id, node)): Path<(String, String)>,
-                     Json(body): Json<Value>| async move {
-                        authed(&h)?;
-                        let mut db = db.lock().unwrap();
-                        if !db.networks.contains_key(&id) {
-                            return Err(StatusCode::NOT_FOUND);
-                        }
-                        let m = db.members.entry((id, node.clone())).or_insert_with(|| {
-                            json!({ "nodeId": node, "config": { "authorized": false, "ipAssignments": [] } })
-                        });
-                        if let Some(a) = body["config"]["authorized"].as_bool() {
-                            m["config"]["authorized"] = json!(a);
-                            m["config"]["ipAssignments"] = json!(if a { vec!["10.147.17.5"] } else { vec![] });
-                        }
-                        if let Some(n) = body["name"].as_str() {
-                            m["name"] = json!(n);
-                        }
-                        Ok(Json(m.clone()))
-                    },
-                ),
-            )
-            .with_state(Shared::default());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        url
-    }
-
     async fn zt_app() -> (tempfile::TempDir, App, Arc<FakeZt>) {
         let (dir, app, _) = app().await;
         let zt = Arc::new(FakeZt::default());
         let app = app.with_exec(zt.clone());
-        let url = fake_central().await;
-        app.profile_add(crate::AddProfile {
-            kind: ProfileKind::Zerotier,
-            name: "zt".into(),
-            values: [("api_url", url.as_str()), ("api_token", "secret")]
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect(),
-        })
-        .await
-        .unwrap();
+        crate::testing::zt_profile(&app).await;
         app.target_attach("laptop", Connection::Local)
             .await
             .unwrap();
@@ -678,7 +677,12 @@ mod tests {
             app.zt_remove("dev-net", true).await,
             Err(AppError::InUse { .. })
         ));
-        app.zt_link("qa-net", "wl-acme-dev-001").await.unwrap();
+        app.zt_link("qa-net", "wl-acme-dev-001", true)
+            .await
+            .unwrap();
+        let n = app.zt_sidecar("wl-acme-dev-001", false).await.unwrap();
+        assert_eq!(n.name, "qa-net");
+        assert!(n.sidecars.is_empty());
         assert_eq!(
             app.zt_for_workload("wl-acme-dev-001")
                 .await
@@ -690,6 +694,7 @@ mod tests {
         app.zt_remove("dev-net", true).await.unwrap();
         app.zt_unlink("wl-acme-dev-001").await.unwrap();
         assert!(app.zt_unlink("wl-acme-dev-001").await.is_err());
+        assert!(app.zt_sidecar("wl-acme-dev-001", true).await.is_err());
         app.zt_remove("qa-net", false).await.unwrap();
         assert!(app.zt_list().await.unwrap().is_empty());
     }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE targets SET connection_json = ?, updated_at = ? WHERE name = ? AND kind = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b83e69ded87e67c4cd7f3366e9f3503654291dc1eda7cc65d693cc2942ec2ca9"
+}

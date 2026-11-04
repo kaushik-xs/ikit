@@ -119,6 +119,25 @@ impl TargetRepo for SqliteTargets {
         .collect()
     }
 
+    async fn update_connection(&self, name: &str, connection: &Connection) -> Result<()> {
+        let kind = connection.kind().as_str();
+        let json = Json(connection);
+        let now = Utc::now();
+        let result = sqlx::query!(
+            "UPDATE targets SET connection_json = ?, updated_at = ? WHERE name = ? AND kind = ?",
+            json,
+            now,
+            name,
+            kind,
+        )
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StateError::NotFound(format!("{kind} target {name}")));
+        }
+        Ok(())
+    }
+
     async fn record_checks(
         &self,
         name: &str,

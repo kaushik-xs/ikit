@@ -73,6 +73,13 @@ pub async fn apply(ctx: &Ctx, yes: bool, allow_changed: bool, force: bool) -> an
     }
     println!("Applied {wl} (run {}).", report.run_id);
     print_containers(&report.containers);
+    if let Some(m) = &report.zerotier {
+        println!(
+            "ZeroTier sidecar {} authorized; published ports are reachable at {}.",
+            m.node_id,
+            m.ips.join(", ")
+        );
+    }
     print_outcomes(&report.hooks_ran);
     Ok(())
 }

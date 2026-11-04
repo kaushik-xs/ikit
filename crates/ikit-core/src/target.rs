@@ -49,6 +49,10 @@ pub enum Connection {
         port: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity_file: Option<PathBuf>,
+        /// Set when `host` is the node's address on a ZeroTier network; `target test`
+        /// refreshes `host` from ZeroTier Central.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zerotier: Option<ZtRoute>,
     },
     /// A cluster reached through a kubeconfig context.
     K8s {
@@ -56,6 +60,16 @@ pub enum Connection {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kubeconfig: Option<PathBuf>,
     },
+}
+
+/// The ZeroTier network and node an SSH target is reached through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZtRoute {
+    /// The ikit network name (see `ikit net zt list`).
+    pub network: String,
+    /// The VM's 10-digit ZeroTier node ID.
+    pub node: String,
 }
 
 impl Connection {
@@ -85,12 +99,16 @@ impl Connection {
     pub fn describe(&self) -> String {
         match self {
             Self::Local => "local".to_owned(),
-            Self::Ssh { port, .. } => {
+            Self::Ssh { port, zerotier, .. } => {
                 let dest = self.ssh_destination().unwrap_or_default();
-                match port {
+                let mut s = match port {
                     Some(p) => format!("ssh {dest}:{p}"),
                     None => format!("ssh {dest}"),
+                };
+                if let Some(zt) = zerotier {
+                    s.push_str(&format!(" via zerotier {}", zt.network));
                 }
+                s
             }
             Self::K8s { context, .. } => format!("context {context}"),
         }
@@ -166,11 +184,28 @@ mod tests {
             user: Some("u".into()),
             port: None,
             identity_file: None,
+            zerotier: None,
         };
         assert_eq!(
             serde_json::to_string(&c).unwrap(),
             r#"{"type":"ssh","host":"h","user":"u"}"#
         );
+        let routed = Connection::Ssh {
+            host: "10.147.17.5".into(),
+            user: Some("ubuntu".into()),
+            port: None,
+            identity_file: None,
+            zerotier: Some(ZtRoute {
+                network: "dev-net".into(),
+                node: "a1b2c3d4e5".into(),
+            }),
+        };
+        assert_eq!(
+            routed.describe(),
+            "ssh ubuntu@10.147.17.5 via zerotier dev-net"
+        );
+        let json = serde_json::to_string(&routed).unwrap();
+        assert_eq!(serde_json::from_str::<Connection>(&json).unwrap(), routed);
         assert_eq!(c.kind(), TargetKind::Vm);
         assert_eq!(
             Connection::K8s {

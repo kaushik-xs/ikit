@@ -134,7 +134,17 @@ fn service_details(
         out.push(format!("secret env changed: {}", changed.join(", ")));
     }
 
-    for field in ["ports", "volumes", "healthcheck", "depends_on", "deploy"] {
+    for field in [
+        "command",
+        "network_mode",
+        "cap_add",
+        "devices",
+        "ports",
+        "volumes",
+        "healthcheck",
+        "depends_on",
+        "deploy",
+    ] {
         if old.get(field) != new.get(field) {
             out.push(format!(
                 "{field} {} → {}",

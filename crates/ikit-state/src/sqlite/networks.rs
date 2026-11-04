@@ -16,18 +16,22 @@ impl SqliteNetworks {
         Self { pool }
     }
 
-    /// Linked workload names per network row id.
-    async fn links(&self) -> Result<BTreeMap<i64, Vec<String>>> {
+    /// Linked workload names per network row id, and which of them run a sidecar.
+    async fn links(&self) -> Result<BTreeMap<i64, Links>> {
         let rows = sqlx::query!(
-            r#"SELECT wn.network_id AS "network_id!", w.name
+            r#"SELECT wn.network_id AS "network_id!", w.name, wn.sidecar AS "sidecar: bool"
                FROM workload_networks wn JOIN workloads w ON w.id = wn.workload_id
                ORDER BY w.name"#
         )
         .fetch_all(&self.pool)
         .await?;
-        let mut links: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        let mut links: BTreeMap<i64, Links> = BTreeMap::new();
         for r in rows {
-            links.entry(r.network_id).or_default().push(r.name);
+            let l = links.entry(r.network_id).or_default();
+            if r.sidecar {
+                l.sidecars.push(r.name.clone());
+            }
+            l.workloads.push(r.name);
         }
         Ok(links)
     }
@@ -36,11 +40,17 @@ impl SqliteNetworks {
         let mut links = self.links().await?;
         rows.into_iter()
             .map(|r| {
-                let workloads = links.remove(&r.id).unwrap_or_default();
-                r.into_network(workloads)
+                let l = links.remove(&r.id).unwrap_or_default();
+                r.into_network(l)
             })
             .collect()
     }
+}
+
+#[derive(Default)]
+struct Links {
+    workloads: Vec<String>,
+    sidecars: Vec<String>,
 }
 
 struct NetworkRow {
@@ -54,7 +64,7 @@ struct NetworkRow {
 }
 
 impl NetworkRow {
-    fn into_network(self, workloads: Vec<String>) -> Result<Network> {
+    fn into_network(self, links: Links) -> Result<Network> {
         Ok(Network {
             id: self.id,
             origin: self.origin.parse().map_err(|e: UnknownVariant| {
@@ -64,7 +74,8 @@ impl NetworkRow {
             network_id: self.network_id,
             profile: self.profile,
             cidr: self.cidr,
-            workloads,
+            workloads: links.workloads,
+            sidecars: links.sidecars,
             created_at: self.created_at,
         })
     }
@@ -94,7 +105,7 @@ impl NetworkRepo for SqliteNetworks {
             "network {} ({})",
             new.name, new.network_id
         )))?
-        .into_network(vec![])
+        .into_network(Links::default())
     }
 
     async fn get(&self, name: &str) -> Result<Option<Network>> {
@@ -133,16 +144,29 @@ impl NetworkRepo for SqliteNetworks {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn link(&self, workload_id: i64, network_id: i64) -> Result<()> {
+    async fn link(&self, workload_id: i64, network_id: i64, sidecar: bool) -> Result<()> {
         sqlx::query!(
-            r#"INSERT INTO workload_networks (workload_id, network_id) VALUES (?, ?)
-               ON CONFLICT (workload_id) DO UPDATE SET network_id = excluded.network_id"#,
+            r#"INSERT INTO workload_networks (workload_id, network_id, sidecar) VALUES (?, ?, ?)
+               ON CONFLICT (workload_id)
+               DO UPDATE SET network_id = excluded.network_id, sidecar = excluded.sidecar"#,
             workload_id,
             network_id,
+            sidecar,
         )
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn set_sidecar(&self, workload_id: i64, sidecar: bool) -> Result<bool> {
+        let result = sqlx::query!(
+            "UPDATE workload_networks SET sidecar = ? WHERE workload_id = ?",
+            sidecar,
+            workload_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn unlink(&self, workload_id: i64) -> Result<bool> {
@@ -228,7 +252,7 @@ mod tests {
             .create("wl", "dev", target.id)
             .await
             .unwrap();
-        store.networks().link(wl.id, n.id).await.unwrap();
+        store.networks().link(wl.id, n.id, false).await.unwrap();
         assert_eq!(
             store
                 .networks()
@@ -245,9 +269,13 @@ mod tests {
         ));
 
         // Linking again moves the workload.
-        store.networks().link(wl.id, other.id).await.unwrap();
+        store.networks().link(wl.id, other.id, true).await.unwrap();
         let linked = store.networks().for_workload(wl.id).await.unwrap().unwrap();
         assert_eq!(linked.name, "other");
+        assert_eq!(linked.sidecars, ["wl-dev-001"]);
+        assert!(store.networks().set_sidecar(wl.id, false).await.unwrap());
+        let linked = store.networks().for_workload(wl.id).await.unwrap().unwrap();
+        assert!(linked.sidecars.is_empty());
         assert!(
             store.networks().list().await.unwrap()[0]
                 .workloads
@@ -256,6 +284,7 @@ mod tests {
 
         assert!(store.networks().unlink(wl.id).await.unwrap());
         assert!(!store.networks().unlink(wl.id).await.unwrap());
+        assert!(!store.networks().set_sidecar(wl.id, true).await.unwrap());
         assert!(store.networks().delete("other").await.unwrap());
         assert!(
             store

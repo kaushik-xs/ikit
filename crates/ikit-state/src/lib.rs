@@ -105,6 +105,8 @@ pub trait TargetRepo: Send + Sync {
     ) -> Result<Target>;
     async fn get(&self, name: &str) -> Result<Option<Target>>;
     async fn list(&self) -> Result<Vec<Target>>;
+    /// Replaces how ikit reaches the target; the kind must stay the same.
+    async fn update_connection(&self, name: &str, connection: &Connection) -> Result<()>;
     async fn record_checks(&self, name: &str, status: TargetStatus, checks: &[Check])
     -> Result<()>;
     /// Fails with [`StateError::InUse`] while workloads run on the target.
@@ -192,7 +194,10 @@ pub trait NetworkRepo: Send + Sync {
     /// Fails with [`StateError::InUse`] while workloads are linked to it.
     async fn delete(&self, name: &str) -> Result<bool>;
     /// Links a workload to a network, replacing any network it was linked to.
-    async fn link(&self, workload_id: i64, network_id: i64) -> Result<()>;
+    async fn link(&self, workload_id: i64, network_id: i64, sidecar: bool) -> Result<()>;
+    /// Turns the ZeroTier sidecar on or off for a linked workload. Returns whether it was
+    /// linked.
+    async fn set_sidecar(&self, workload_id: i64, sidecar: bool) -> Result<bool>;
     /// Returns whether the workload was linked.
     async fn unlink(&self, workload_id: i64) -> Result<bool>;
     async fn for_workload(&self, workload_id: i64) -> Result<Option<Network>>;

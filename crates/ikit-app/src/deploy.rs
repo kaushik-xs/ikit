@@ -9,10 +9,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ikit_core::{
-    Connection, HookPhase, Run, RunAction, RunResult, Target, Workload, WorkloadStatus,
+    Connection, HookPhase, Network, Run, RunAction, RunResult, Target, Workload, WorkloadStatus,
 };
+use ikit_net::Member;
 use ikit_provider::compose::{
-    self, COMPOSE_FILE, Plan, Rendered, SECRETS_FILE, ServiceInput, WorkloadInput,
+    self, COMPOSE_FILE, Plan, Rendered, SECRETS_FILE, ServiceInput, WorkloadInput, ZT_SIDECAR,
+    ZtSidecar,
 };
 use ikit_state::NewRun;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,9 @@ use crate::{App, AppError, ExecOutput, Result};
 pub(crate) const QUICK: Duration = Duration::from_secs(60);
 /// `docker compose up --wait` pulls images and waits for health checks.
 const DEPLOY: Duration = Duration::from_secs(15 * 60);
+/// How long the ZeroTier sidecar gets to start answering `zerotier-cli`.
+const SIDECAR_ATTEMPTS: u32 = 15;
+const SIDECAR_INTERVAL: Duration = Duration::from_secs(2);
 /// A lock older than this belongs to a run that died.
 const STALE_LOCK: chrono::Duration = chrono::Duration::minutes(30);
 
@@ -75,6 +80,8 @@ pub struct ApplyReport {
     pub containers: Vec<ContainerStatus>,
     /// Hook steps that ran (pre-apply and post-apply).
     pub hooks_ran: Vec<HookOutcome>,
+    /// The ZeroTier sidecar's member, authorized by the apply, if the workload runs one.
+    pub zerotier: Option<Member>,
 }
 
 /// Where a workload's compose project lives.
@@ -380,10 +387,14 @@ impl App {
                 secrets,
             });
         }
+        let zerotier = self.zt_sidecar_network(workload).await?.map(|n| ZtSidecar {
+            network_id: n.network_id,
+        });
         let input = WorkloadInput {
             org: self.org.name.clone(),
             workload: workload.to_owned(),
             services,
+            zerotier,
         };
         compose::render(&input).map_err(|e| AppError::Invalid(e.to_string()))
     }
@@ -528,6 +539,11 @@ impl App {
             if !out.success() {
                 return Err(failed("docker compose up", &out));
             }
+            // Authorized before post-apply hooks, which may reach the workload over ZeroTier.
+            let zerotier = match self.zt_sidecar_network(&wl.name).await? {
+                Some(network) => Some(self.authorize_sidecar(&place, &wl.name, &network).await?),
+                None => None,
+            };
             // Post-apply hooks see the workload as applied (services are up).
             let up = Workload {
                 status: WorkloadStatus::Applied,
@@ -544,12 +560,12 @@ impl App {
                 )
                 .await?,
             );
-            Ok(ran)
+            Ok((ran, zerotier))
         }
         .await;
 
         match outcome {
-            Ok(hooks_ran) => {
+            Ok((hooks_ran, zerotier)) => {
                 self.store
                     .workloads()
                     .set_status(wl.id, WorkloadStatus::Applied)
@@ -564,6 +580,7 @@ impl App {
                     plan,
                     containers,
                     hooks_ran,
+                    zerotier,
                 })
             }
             Err(e) => {
@@ -636,6 +653,15 @@ impl App {
                             tracing::warn!(hook = %o.hook, "{w}");
                         }
                     }
+                    // Deleting the volumes deletes the sidecar's identity; revoke it too.
+                    let sidecar = match self.zt_sidecar_network(workload).await? {
+                        Some(n) if volumes => self
+                            .sidecar_node(&place, workload)
+                            .await
+                            .ok()
+                            .map(|node| (n, node)),
+                        _ => None,
+                    };
                     let mut args = vec!["down", "--remove-orphans"];
                     if volumes {
                         args.push("--volumes");
@@ -643,6 +669,14 @@ impl App {
                     let out = self.compose(&place, workload, &args, DEPLOY).await?;
                     if !out.success() {
                         return Err(failed("docker compose down", &out));
+                    }
+                    if let Some((network, node)) = sidecar
+                        && let Err(e) = self.zt_authorize(&network.name, &node, false, None).await
+                    {
+                        tracing::warn!(
+                            "could not deauthorize ZeroTier node {node} on `{}`: {e}",
+                            network.name
+                        );
                     }
                 }
                 match &place {
@@ -690,6 +724,53 @@ impl App {
         .await;
         self.store.workloads().unlock(wl.id, &holder).await?;
         result
+    }
+
+    /// The network whose ZeroTier sidecar `workload` runs, if any.
+    pub(crate) async fn zt_sidecar_network(&self, workload: &str) -> Result<Option<Network>> {
+        Ok(self
+            .zt_for_workload(workload)
+            .await?
+            .filter(|n| n.sidecars.iter().any(|w| w == workload)))
+    }
+
+    /// The node ID of the workload's running ZeroTier sidecar.
+    async fn sidecar_node(&self, place: &Place, workload: &str) -> Result<String> {
+        let args = ["exec", "-T", ZT_SIDECAR, "zerotier-cli", "-j", "info"];
+        let out = self.compose(place, workload, &args, QUICK).await?;
+        if !out.success() {
+            return Err(failed("zerotier-cli info in the sidecar", &out));
+        }
+        let info = ikit_net::parse_info(&out.stdout).map_err(crate::zerotier::net)?;
+        Ok(info.address)
+    }
+
+    /// Waits for the sidecar's ZeroTier service, then authorizes its node on `network`,
+    /// named after the workload.
+    async fn authorize_sidecar(
+        &self,
+        place: &Place,
+        workload: &str,
+        network: &Network,
+    ) -> Result<Member> {
+        let mut attempt = 0;
+        let node = loop {
+            attempt += 1;
+            match self.sidecar_node(place, workload).await {
+                Ok(node) => break node,
+                Err(e) if attempt >= SIDECAR_ATTEMPTS => {
+                    return Err(AppError::Invalid(format!(
+                        "the ZeroTier sidecar did not start: {e}. On the target, \
+                         `/dev/net/tun` must exist and ZeroTier must not already run on the host"
+                    )));
+                }
+                Err(_) => tokio::time::sleep(SIDECAR_INTERVAL).await,
+            }
+        };
+        let (member, _) = self
+            .zt_authorize_with_address(network, &node, workload)
+            .await?;
+        Ok(member)
     }
 
     pub async fn workload_runs(&self, workload: &str, limit: i64) -> Result<Vec<Run>> {
@@ -812,6 +893,13 @@ mod tests {
                     ..Default::default()
                 });
             }
+            if line.contains("zerotier-cli -j info") {
+                return Ok(ExecOutput {
+                    code: Some(0),
+                    stdout: r#"{"address":"f1e2d3c4b5","online":true,"version":"1.14.2"}"#.into(),
+                    ..Default::default()
+                });
+            }
             if line.contains(" exec -T ") && line.contains("FAIL") {
                 return Ok(ExecOutput {
                     code: Some(127),
@@ -902,6 +990,47 @@ mod tests {
         assert_eq!(
             app.workload_runs("wl-acme-dev-001", 5).await.unwrap()[0].result,
             RunResult::Ok
+        );
+    }
+
+    #[tokio::test]
+    async fn zerotier_sidecar_is_deployed_and_authorized() {
+        let (_dir, app, docker) = setup().await;
+        crate::testing::zt_profile(&app).await;
+        let n = app
+            .zt_create("dev-net", "zt", None, Some("wl-acme-dev-001"))
+            .await
+            .unwrap();
+        let plan = app.deploy_plan("wl-acme-dev-001").await.unwrap();
+        assert!(
+            !plan.rendered.compose.contains(ZT_SIDECAR),
+            "off by default"
+        );
+
+        app.zt_sidecar("wl-acme-dev-001", true).await.unwrap();
+        let plan = app.deploy_plan("wl-acme-dev-001").await.unwrap();
+        assert!(
+            plan.plan.changes.iter().any(|c| c.service() == ZT_SIDECAR),
+            "{:?}",
+            plan.plan
+        );
+        let report = app.deploy_apply(&plan, "test", false).await.unwrap();
+        let member = report.zerotier.unwrap();
+        assert_eq!(member.node_id, "f1e2d3c4b5");
+        assert!(member.authorized);
+        assert_eq!(member.name, "wl-acme-dev-001");
+        assert!(!member.ips.is_empty());
+
+        app.deploy_destroy("wl-acme-dev-001", true, "test")
+            .await
+            .unwrap();
+        let members = app.zt_members(&n.name).await.unwrap();
+        assert!(!members[0].authorized, "destroy --volumes revokes the node");
+        let calls = docker.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("exec -T ikit-zerotier zerotier-cli -j info"))
         );
     }
 
@@ -1011,6 +1140,7 @@ mod tests {
             user: Some("ubuntu".into()),
             port: None,
             identity_file: None,
+            zerotier: None,
         };
         app.target_attach("edge", conn).await.unwrap();
         app.workload_create("dev", "edge").await.unwrap();

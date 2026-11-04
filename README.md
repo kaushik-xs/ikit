@@ -10,10 +10,10 @@ registry, attached targets, workloads with service groups, orgs) and Phase 2 (Do
 deploys to local and SSH targets, registry logins, an MCP server) Phase 3 (SQL, shell and HTTP
 hooks; MCP tools that change definitions, gated per env), Phase 4 (blob storage, database
 backups, digest pinning, registry sync, MCP deploys behind plan IDs and confirmation tokens) and
-Phase 7 (drift detection, `registry outdated`, MCP hooks and prompts, CLI integration tests, a
-release workflow). Phase 6 (ZeroTier) is in progress: networks, members, joins and MCP over HTTP
-are done; the Compose sidecar and VM targets managed over ZeroTier IPs are not yet. Phases 5 and
-6b (Kubernetes, creating targets) are still open.
+Phase 6 (ZeroTier: networks, members, joins, VM targets reached at their ZeroTier address, a
+Compose sidecar, MCP over HTTP) and Phase 7 (drift detection, `registry outdated`, MCP hooks and
+prompts, CLI integration tests, a release workflow). Phases 5 and 6b (Kubernetes, creating
+targets) are still open.
 
 ## Usage
 
@@ -87,7 +87,10 @@ ikit net zt attach shared 8056c2e21c000001 --profile zt   # an existing network
 ikit net zt join dev-net --target box --authorize  # zerotier-cli join over SSH, then authorize
 ikit net zt members dev-net | show dev-net | status [--target box]
 ikit net zt authorize dev-net a1b2c3d4e5 | deauthorize dev-net a1b2c3d4e5
-ikit net zt link dev-net | unlink                  # the selected workload (or --wl)
+ikit net zt link dev-net [--sidecar] | unlink      # the selected workload (or --wl)
+ikit net zt sidecar on|off                         # a ZeroTier container in the workload
+ikit target attach vm box --zt dev-net --node a1b2c3d4e5 --user ubuntu   # SSH at its ZeroTier address
+ikit target use-zt edge dev-net                    # move an SSH target onto its ZeroTier address
 ikit net zt rm dev-net [--delete]                  # --delete also deletes it in Central
 ```
 
@@ -169,6 +172,18 @@ SQL hooks:
 - `join`, `leave` and `status` run `zerotier-cli` here or on a VM target over SSH, falling back to
   `sudo -n` when the CLI cannot read the service's auth token as the current user.
 - `authorize` works before a node joins, so a VM can be pre-authorized by its node ID.
+- VM targets can be reached over SSH at their ZeroTier address, so their SSH port never has to
+  be public. `target attach vm <name> --zt <network> --node <id>` authorizes the node (it may
+  join later) and uses the address Central assigns it; `target use-zt <name> <network>` joins an
+  existing SSH target over its current connection and switches it to its ZeroTier address.
+  `target test` first checks the node is authorized in Central and picks up a changed address.
+  A network can't be removed while a target is reached through it.
+- `net zt link --sidecar` (or `net zt sidecar on`) adds an `ikit-zerotier` service to the
+  workload's compose file: `zerotier/zerotier` on the host network with its identity in a named
+  volume. `apply` authorizes it, named after the workload, before post-apply hooks run, so
+  published ports are reachable at the target's ZeroTier address. Use it on Linux VMs that do
+  not run ZeroTier themselves (it needs `/dev/net/tun`). `destroy --volumes` deletes its
+  identity and deauthorizes it; turning the sidecar off leaves the node authorized.
 
 ### MCP
 

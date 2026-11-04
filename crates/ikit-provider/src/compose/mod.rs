@@ -2,7 +2,10 @@ mod diff;
 mod render;
 
 pub use diff::{Change, Plan, diff};
-pub use render::{RenderError, Rendered, ServiceInput, WorkloadInput, image_registry, render};
+pub use render::{
+    RenderError, Rendered, ServiceInput, WorkloadInput, ZT_SIDECAR, ZT_SIDECAR_IMAGE, ZtSidecar,
+    image_registry, render,
+};
 
 /// Main compose file; holds no secret values.
 pub const COMPOSE_FILE: &str = "compose.yaml";

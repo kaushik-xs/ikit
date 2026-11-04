@@ -61,7 +61,7 @@ pub use registry::{
     Category, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,
 };
 pub use storage::{Backup, Storage, StorageOptions, StorageProvider};
-pub use target::{Connection, Target, TargetKind, TargetStatus};
+pub use target::{Connection, Target, TargetKind, TargetStatus, ZtRoute};
 pub use version::{Dependency, VersionConstraint, VersionError};
 pub use workload::{
     PublishedPort, Run, RunAction, RunResult, ServiceInstance, Workload, WorkloadName,

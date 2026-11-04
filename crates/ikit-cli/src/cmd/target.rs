@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::Subcommand;
+use clap::{ArgGroup, Subcommand};
+use ikit_app::ZtSsh;
 use ikit_core::target::parse_ssh_destination;
 use ikit_core::{Connection, Target, TargetStatus};
 
@@ -19,6 +20,15 @@ pub enum TargetCmd {
     Show { name: String },
     /// Check a target is reachable and ready for workloads.
     Test { name: String },
+    /// Reach an SSH target over ZeroTier from now on: join it to the network over its
+    /// current connection, authorize it, and switch to its ZeroTier address.
+    UseZt {
+        name: String,
+        /// ikit network name (see `ikit net zt list`).
+        network: String,
+        #[arg(long)]
+        no_test: bool,
+    },
     /// Remove an attached target from ikit (the host or cluster is not touched).
     Detach {
         name: String,
@@ -29,17 +39,32 @@ pub enum TargetCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum AttachCmd {
-    /// A VM running Docker: this machine (--local) or one reached over SSH.
+    /// A VM running Docker: this machine (--local), one reached over SSH, or one reached
+    /// over SSH at its ZeroTier address (--zt with --node).
+    #[command(group(ArgGroup::new("remote").args(["ssh", "zt"])))]
     Vm {
         name: String,
         /// This machine.
-        #[arg(long, conflicts_with = "ssh", required_unless_present = "ssh")]
+        #[arg(long, conflicts_with_all = ["ssh", "zt"], required_unless_present_any = ["ssh", "zt"])]
         local: bool,
         /// [user@]host[:port]; uses your ssh config and agent.
-        #[arg(long, value_name = "[USER@]HOST[:PORT]")]
+        #[arg(long, value_name = "[USER@]HOST[:PORT]", conflicts_with = "zt")]
         ssh: Option<String>,
+        /// ikit ZeroTier network the VM is on; it is reached at its address there.
+        #[arg(long, value_name = "NETWORK", requires = "node")]
+        zt: Option<String>,
+        /// The VM's ZeroTier node ID (`zerotier-cli info` on the VM); it is authorized,
+        /// even before it joins.
+        #[arg(long, requires = "zt")]
+        node: Option<String>,
+        /// SSH user, with --zt.
+        #[arg(long, requires = "zt")]
+        user: Option<String>,
+        /// SSH port, with --zt.
+        #[arg(long, requires = "zt")]
+        port: Option<u16>,
         /// SSH private key.
-        #[arg(long, requires = "ssh", value_name = "FILE")]
+        #[arg(long, requires = "remote", value_name = "FILE")]
         identity: Option<PathBuf>,
         /// Skip the connectivity test.
         #[arg(long)]
@@ -61,6 +86,35 @@ pub enum AttachCmd {
 pub async fn run(ctx: &Ctx, cmd: TargetCmd) -> anyhow::Result<()> {
     let app = ctx.app().await?;
     match cmd {
+        TargetCmd::Attach(AttachCmd::Vm {
+            name,
+            zt: Some(network),
+            node: Some(node),
+            user,
+            port,
+            identity,
+            no_test,
+            ..
+        }) => {
+            let ssh = ZtSsh {
+                network,
+                node,
+                user,
+                port,
+                identity_file: identity,
+            };
+            let mut target = app.target_attach_zt(&name, ssh).await?;
+            if !no_test {
+                target = app.target_test(&name).await?;
+            }
+            render(ctx, &target)?;
+            if target.status == TargetStatus::Failed {
+                warn(format!(
+                    "target {name} was attached but failed its checks; once the VM has joined the \
+                     network, run `ikit target test {name}`"
+                ));
+            }
+        }
         TargetCmd::Attach(attach) => {
             let (name, connection, no_test) = match attach {
                 AttachCmd::Vm {
@@ -79,6 +133,7 @@ pub async fn run(ctx: &Ctx, cmd: TargetCmd) -> anyhow::Result<()> {
                             user,
                             port,
                             identity_file: identity,
+                            zerotier: None,
                         },
                         no_test,
                     )
@@ -139,6 +194,27 @@ pub async fn run(ctx: &Ctx, cmd: TargetCmd) -> anyhow::Result<()> {
             render(ctx, &target)?;
             if target.status == TargetStatus::Failed {
                 std::process::exit(1);
+            }
+        }
+        TargetCmd::UseZt {
+            name,
+            network,
+            no_test,
+        } => {
+            let mut target = app.target_use_zt(&name, &network).await?;
+            if !no_test {
+                target = app.target_test(&name).await?;
+            }
+            render(ctx, &target)?;
+            if target.status == TargetStatus::Failed {
+                warn(format!(
+                    "target {name} now uses its ZeroTier address but failed its checks; \
+                     run `ikit target test {name}` once the node is online"
+                ));
+            } else if ctx.output == Output::Table {
+                println!(
+                    "Target {name} is reached over ZeroTier; its public SSH port can be closed."
+                );
             }
         }
         TargetCmd::Detach { name, yes } => {

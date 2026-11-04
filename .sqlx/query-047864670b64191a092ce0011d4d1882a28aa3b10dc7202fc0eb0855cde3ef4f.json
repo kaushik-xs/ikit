@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT wn.network_id AS \"network_id!\", w.name, wn.sidecar AS \"sidecar: bool\"\n               FROM workload_networks wn JOIN workloads w ON w.id = wn.workload_id\n               ORDER BY w.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "network_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "sidecar: bool",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "047864670b64191a092ce0011d4d1882a28aa3b10dc7202fc0eb0855cde3ef4f"
+}

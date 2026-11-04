@@ -79,7 +79,18 @@ pub enum ZtCmd {
     /// Revoke a node's access.
     Deauthorize { name: String, node: String },
     /// Link the selected workload (or --wl) to the network.
-    Link { name: String },
+    Link {
+        name: String,
+        /// Also run a ZeroTier sidecar container in the workload that joins the network,
+        /// for VM targets without ZeroTier installed. Applied on the next `ikit apply`.
+        #[arg(long)]
+        sidecar: bool,
+    },
+    /// Turn the ZeroTier sidecar of the selected workload (or --wl) on or off.
+    Sidecar {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// Unlink the selected workload (or --wl) from its network.
     Unlink,
     /// Show this machine's (or --target's) ZeroTier node and joined networks.
@@ -180,7 +191,7 @@ pub async fn run(ctx: &Ctx, cmd: NetCmd) -> anyhow::Result<()> {
                     n.cidr.clone().unwrap_or_default(),
                     n.origin.to_string(),
                     n.profile.clone(),
-                    n.workloads.join(", "),
+                    workloads(n),
                 ]);
             }
             println!("{t}");
@@ -209,7 +220,7 @@ pub async fn run(ctx: &Ctx, cmd: NetCmd) -> anyhow::Result<()> {
                 if n.workloads.is_empty() {
                     "-".to_owned()
                 } else {
-                    n.workloads.join(", ")
+                    workloads(n)
                 }
             );
             println!();
@@ -290,13 +301,36 @@ pub async fn run(ctx: &Ctx, cmd: NetCmd) -> anyhow::Result<()> {
             }
             println!("Deauthorized {} on `{name}`.", m.node_id);
         }
-        ZtCmd::Link { name } => {
+        ZtCmd::Link { name, sidecar } => {
             let wl = selected_wl()?;
-            let n = app.zt_link(&name, &wl).await?;
+            let n = app.zt_link(&name, &wl, sidecar).await?;
             if ctx.output == Output::Json {
                 return print_json(&n);
             }
             println!("Linked {wl} to `{}`.", n.name);
+            if sidecar {
+                println!("The next `ikit apply` deploys a ZeroTier sidecar and authorizes it.");
+            }
+        }
+        ZtCmd::Sidecar { state } => {
+            let wl = selected_wl()?;
+            let on = state == "on";
+            let n = app.zt_sidecar(&wl, on).await?;
+            if ctx.output == Output::Json {
+                return print_json(&n);
+            }
+            if on {
+                println!(
+                    "{wl} will run a ZeroTier sidecar on `{}` from the next `ikit apply`.",
+                    n.name
+                );
+            } else {
+                println!(
+                    "The next `ikit apply` removes {wl}'s ZeroTier sidecar. Its node stays authorized; \
+                     revoke it with `ikit net zt deauthorize {} <node>`.",
+                    n.name
+                );
+            }
         }
         ZtCmd::Unlink => {
             let wl = selected_wl()?;
@@ -362,6 +396,21 @@ pub async fn run(ctx: &Ctx, cmd: NetCmd) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Linked workloads, marking those that run a sidecar.
+fn workloads(n: &Network) -> String {
+    n.workloads
+        .iter()
+        .map(|w| {
+            if n.sidecars.contains(w) {
+                format!("{w} (sidecar)")
+            } else {
+                w.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn linked(n: &Network) -> String {

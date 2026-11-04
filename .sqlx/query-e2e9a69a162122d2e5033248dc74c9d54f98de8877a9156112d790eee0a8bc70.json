@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workload_networks (workload_id, network_id, sidecar) VALUES (?, ?, ?)\n               ON CONFLICT (workload_id)\n               DO UPDATE SET network_id = excluded.network_id, sidecar = excluded.sidecar",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e2e9a69a162122d2e5033248dc74c9d54f98de8877a9156112d790eee0a8bc70"
+}
