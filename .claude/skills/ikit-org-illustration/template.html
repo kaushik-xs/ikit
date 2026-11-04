@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Acme Org Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* TEMPLATE: example data for a fictional org "acme". Replace every value with what collect.sh prints; keep the layout system. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #1b2230;
+  --muted: #5b6577;
+  --line: #d5dae3;
+  --accent: #1f6f8b;
+  --accent-soft: #e2eff4;
+  --app: #2f5fb3;      --app-soft: #e6edf9;
+  --platform: #a3620b; --platform-soft: #f8eedf;
+  --data: #2d7d52;     --data-soft: #e3f2ea;
+  --secret: #7a4fa8;   --secret-soft: #f0e8f8;
+  --bad: #b3412f;
+  --font-display: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161d; --surface: #1a2029; --fg: #e4e8ef; --muted: #98a2b3; --line: #2e3643;
+    --accent: #5fb3d1; --accent-soft: #19323d;
+    --app: #82a8ec; --app-soft: #1c2840;
+    --platform: #e0a552; --platform-soft: #352813;
+    --data: #6cc795; --data-soft: #16301f;
+    --secret: #b893e0; --secret-soft: #2a2036;
+    --bad: #e07a68;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161d; --surface: #1a2029; --fg: #e4e8ef; --muted: #98a2b3; --line: #2e3643;
+  --accent: #5fb3d1; --accent-soft: #19323d;
+  --app: #82a8ec; --app-soft: #1c2840;
+  --platform: #e0a552; --platform-soft: #352813;
+  --data: #6cc795; --data-soft: #16301f;
+  --secret: #b893e0; --secret-soft: #2a2036;
+  --bad: #e07a68;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+}
+.wrap { max-width: 1440px; margin: 0 auto; padding: 32px 16px 36px; display: grid; gap: 22px; }
+header { display: grid; gap: 8px; padding-inline: 8px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: 38px; line-height: 1.1; margin: 0; }
+.lede { margin: 0; color: var(--muted); font-size: 16px; max-width: 90ch; }
+.lede code { font-family: var(--font-mono); font-size: .9em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; color: var(--fg); }
+
+.diagram { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; min-width: 1100px; height: auto; }
+svg text { font-family: var(--font-body); fill: var(--fg); }
+svg .mono { font-family: var(--font-mono); }
+svg .muted { fill: var(--muted); }
+svg .small { font-size: 12px; }
+svg .label { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; font-weight: 600; }
+svg .title { font-family: var(--font-display); font-size: 15px; font-weight: 700; }
+svg .name { font-family: var(--font-mono); font-size: 14px; font-weight: 600; }
+svg .org { fill: var(--bg); stroke: var(--accent); stroke-width: 1.5; }
+svg .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+svg .empty { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .wl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+svg .g-app { fill: var(--app-soft); stroke: var(--app); }
+svg .g-data { fill: var(--data-soft); stroke: var(--data); }
+svg .t-app { fill: var(--app); } svg .t-platform { fill: var(--platform); } svg .t-data { fill: var(--data); }
+svg .node { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+svg .secret { fill: var(--secret-soft); stroke: var(--secret); stroke-dasharray: 5 4; }
+svg .t-secret { fill: var(--secret); }
+svg .arrow { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+svg .dep { stroke: var(--app); stroke-width: 1.5; fill: none; }
+svg .call { stroke: var(--app); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+svg .ah { fill: var(--accent); }
+svg .ah-app { fill: var(--app); }
+svg .ah-data { fill: var(--data); }
+svg .dataflow { stroke: var(--data); stroke-width: 1.5; fill: none; }
+svg .t-accent { fill: var(--accent); }
+svg .ok { fill: var(--data); }
+svg .bad { fill: var(--bad); }
+svg .t-bad { fill: var(--bad); }
+svg .status { fill: var(--data-soft); stroke: var(--data); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">ikit org · acme · snapshot 5 Nov 2026</div>
+    <h1>Acme Corp</h1>
+    <p class="lede">Org <code>acme</code> uses the prefix <code>wl-acme</code> and the envs dev, qa, stg and prod. Only digest-pinned images are accepted in prod. There is one workload so far. It runs seven services on this laptop: five Acme apps backed by Postgres and Redis.</p>
+  </header>
+
+  <div class="diagram" role="img" aria-label="Org acme. Org-wide: a registry of ten services with a ghcr.io login, and one local target named laptop. No profiles, storages or networks yet. Workload wl-acme-dev-001 is applied on laptop. Its app group has web, gateway, orders, worker and auth; its data group has postgres 18.4 and redis 7.0. Eight applies so far, five ok and three failed. Eight secret values are kept in the OS keychain.">
+    <svg viewBox="0 0 1400 790" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+        <marker id="ah-app" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-app"/></marker>
+        <marker id="ah-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-data"/></marker>
+      </defs>
+
+      <!-- org frame -->
+      <rect x="10" y="10" width="1380" height="770" rx="12" class="org"/>
+      <text x="30" y="40" class="title">org <tspan class="mono">acme</tspan></text>
+      <text x="112" y="40" class="small muted">~/.ikit/orgs/acme · own state.db · own keychain keys</text>
+
+      <!-- ===== left column: org-wide ===== -->
+      <text x="30" y="76" class="label muted">Org-wide</text>
+
+      <rect x="30" y="88" width="300" height="340" rx="8" class="box"/>
+      <text x="46" y="112" class="title">Registry</text>
+      <text x="46" y="132" class="small muted">10 services · login to <tspan class="mono">ghcr.io</tspan></text>
+
+      <text x="46" y="160" class="label t-app">app</text>
+      <text x="46" y="180" class="small mono">auth <tspan class="muted">0.1.10</tspan></text>
+      <text x="46" y="198" class="small mono">web <tspan class="muted">latest tag</tspan></text>
+      <text x="46" y="216" class="small mono">orders <tspan class="muted">latest tag</tspan></text>
+      <text x="46" y="234" class="small mono">gateway <tspan class="muted">latest tag</tspan></text>
+      <text x="46" y="252" class="small mono">worker <tspan class="muted">latest tag</tspan></text>
+
+      <text x="46" y="282" class="label t-platform">platform</text>
+      <text x="46" y="302" class="small mono">nginx <tspan class="muted">1.27.3</tspan></text>
+      <text x="46" y="320" class="small mono">traefik <tspan class="muted">3.2.3</tspan></text>
+
+      <text x="46" y="350" class="label t-data">data</text>
+      <text x="46" y="370" class="small mono">postgres <tspan class="muted">16.6 · 17.2 · 18.4</tspan></text>
+      <text x="46" y="388" class="small mono">mysql <tspan class="muted">8.4.3</tspan></text>
+      <text x="46" y="406" class="small mono">redis <tspan class="muted">7.0.0 · 7.4.1</tspan></text>
+
+      <rect x="30" y="448" width="300" height="118" rx="8" class="box"/>
+      <text x="46" y="472" class="title">Target <tspan class="mono">laptop</tspan></text>
+      <text x="46" y="494" class="small muted">vm · local Docker</text>
+      <circle cx="50" cy="514" r="5" class="ok"/>
+      <text x="62" y="518" class="small">ready</text>
+      <text x="46" y="538" class="small mono muted">engine 29.0.1 · compose 2.40.3</text>
+      <text x="46" y="556" class="small muted">checked 4 Nov, 10:30 UTC</text>
+
+      <rect x="30" y="586" width="300" height="104" rx="8" class="empty"/>
+      <text x="46" y="610" class="title muted">Not set up yet</text>
+      <text x="46" y="632" class="small muted">profiles (aws · azure · gcp · zerotier)</text>
+      <text x="46" y="650" class="small muted">storages and backups</text>
+      <text x="46" y="668" class="small muted">ZeroTier networks · MCP tokens</text>
+
+      <!-- workload → org-wide -->
+      <line x1="420" y1="240" x2="332" y2="240" class="arrow" marker-end="url(#ah)"/>
+      <text x="376" y="230" class="small t-accent" text-anchor="middle">pins versions</text>
+      <line x1="420" y1="507" x2="332" y2="507" class="arrow" marker-end="url(#ah)"/>
+      <text x="376" y="497" class="small t-accent" text-anchor="middle">runs on</text>
+
+      <!-- ===== workload ===== -->
+      <rect x="420" y="60" width="956" height="706" rx="10" class="wl"/>
+      <text x="440" y="88" class="label t-accent">Workload</text>
+      <text x="440" y="116" class="title mono" style="font-size:17px">wl-acme-dev-001</text>
+      <rect x="610" y="99" width="70" height="24" rx="12" class="status"/>
+      <text x="645" y="116" class="small t-data" text-anchor="middle" style="font-weight:600">applied</text>
+      <text x="694" y="116" class="small muted">env dev · target laptop · 7 services in 2 groups · no platform group</text>
+
+      <!-- app group -->
+      <rect x="440" y="140" width="700" height="356" rx="8" class="g-app"/>
+      <text x="456" y="164" class="label t-app">app · 5 services</text>
+
+      <!-- row 1 -->
+      <rect x="460" y="180" width="200" height="104" rx="7" class="node"/>
+      <text x="476" y="206" class="name">web</text>
+      <text x="476" y="228" class="small mono muted">ghcr.io · staging-latest</text>
+      <text x="476" y="248" class="small">host port <tspan class="mono">:3000</tspan></text>
+      <text x="476" y="268" class="small muted">no secrets</text>
+
+      <rect x="690" y="180" width="200" height="104" rx="7" class="node"/>
+      <text x="706" y="206" class="name">orders</text>
+      <text x="706" y="228" class="small mono muted">orders:latest</text>
+      <text x="706" y="248" class="small">S3 bucket for uploads</text>
+      <text x="706" y="268" class="small muted">3 secrets</text>
+
+      <rect x="920" y="180" width="200" height="104" rx="7" class="node"/>
+      <text x="936" y="206" class="name">worker</text>
+      <text x="936" y="228" class="small mono muted">worker:latest</text>
+      <text x="936" y="248" class="small">internal only</text>
+      <text x="936" y="268" class="small muted">1 secret</text>
+
+      <!-- row 2 -->
+      <rect x="460" y="372" width="200" height="104" rx="7" class="node"/>
+      <text x="476" y="398" class="name">gateway</text>
+      <text x="476" y="420" class="small mono muted">gateway:latest</text>
+      <text x="476" y="440" class="small">host port <tspan class="mono">:3001 → 3000</tspan></text>
+      <text x="476" y="460" class="small muted">1 secret</text>
+
+      <rect x="920" y="372" width="200" height="104" rx="7" class="node"/>
+      <text x="936" y="398" class="name">auth</text>
+      <text x="936" y="420" class="small mono muted">auth:v0.1.10</text>
+      <text x="936" y="440" class="small">auth and sessions</text>
+      <text x="936" y="460" class="small muted">2 secrets</text>
+
+      <!-- app edges -->
+      <line x1="560" y1="284" x2="560" y2="370" class="call" marker-end="url(#ah-app)"/>
+      <text x="570" y="332" class="small t-app">calls API</text>
+      <line x1="890" y1="232" x2="918" y2="232" class="dep" marker-end="url(#ah-app)"/>
+      <path d="M790,284 C790,380 860,404 918,404" class="dep" marker-end="url(#ah-app)"/>
+      <line x1="660" y1="444" x2="918" y2="444" class="dep" marker-end="url(#ah-app)"/>
+
+      <!-- legend, top right of the app group -->
+      <line x1="846" y1="160" x2="878" y2="160" class="dep" marker-end="url(#ah-app)"/>
+      <text x="884" y="164" class="small muted">starts after</text>
+      <line x1="976" y1="160" x2="1008" y2="160" class="call" marker-end="url(#ah-app)"/>
+      <text x="1014" y="164" class="small muted">calls over HTTP</text>
+
+      <!-- data group -->
+      <rect x="1160" y="140" width="196" height="356" rx="8" class="g-data"/>
+      <text x="1176" y="164" class="label t-data">data · 2 services</text>
+
+      <rect x="1172" y="180" width="172" height="104" rx="7" class="node"/>
+      <text x="1188" y="206" class="name">postgres</text>
+      <text x="1188" y="228" class="small mono muted">18.4-alpine</text>
+      <text x="1188" y="248" class="small">volume postgres_data</text>
+      <text x="1188" y="268" class="small muted">used by 4 apps</text>
+
+      <rect x="1172" y="372" width="172" height="104" rx="7" class="node"/>
+      <text x="1188" y="398" class="name">redis</text>
+      <text x="1188" y="420" class="small mono muted">7-alpine</text>
+      <text x="1188" y="440" class="small">pinned 7.0.0</text>
+      <text x="1188" y="460" class="small muted">used by 3 apps</text>
+
+      <!-- app → data -->
+      <line x1="1122" y1="232" x2="1170" y2="232" class="dataflow" marker-end="url(#ah-data)"/>
+      <line x1="1122" y1="424" x2="1170" y2="424" class="dataflow" marker-end="url(#ah-data)"/>
+
+      <!-- bottom row -->
+      <rect x="440" y="516" width="296" height="122" rx="8" class="box"/>
+      <text x="456" y="540" class="title">Runs</text>
+      <text x="456" y="560" class="small muted">8 applies · <tspan class="t-data">5 ok</tspan> · <tspan class="t-bad">3 failed</tspan></text>
+      <circle cx="462" cy="584" r="6" class="ok"/>
+      <circle cx="482" cy="584" r="6" class="bad"/>
+      <circle cx="502" cy="584" r="6" class="bad"/>
+      <circle cx="522" cy="584" r="6" class="bad"/>
+      <circle cx="542" cy="584" r="6" class="ok"/>
+      <circle cx="562" cy="584" r="6" class="ok"/>
+      <circle cx="582" cy="584" r="6" class="ok"/>
+      <circle cx="602" cy="584" r="6" class="ok"/>
+      <text x="456" y="610" class="small muted">latest ok, 4 Nov 18:54 UTC</text>
+      <text x="456" y="626" class="small muted">no hooks · not locked</text>
+
+      <rect x="756" y="516" width="296" height="122" rx="8" class="box"/>
+      <text x="772" y="540" class="title">Compose networks</text>
+      <text x="772" y="562" class="small"><tspan class="mono t-app">app</tspan> <tspan class="muted">the 5 app services</tspan></text>
+      <text x="772" y="582" class="small"><tspan class="mono t-data">data</tspan> <tspan class="muted">all 7 services</tspan></text>
+      <text x="772" y="604" class="small muted">no external Docker networks</text>
+      <text x="772" y="622" class="small muted">no ZeroTier network linked</text>
+
+      <rect x="1072" y="516" width="284" height="122" rx="8" class="box"/>
+      <text x="1088" y="540" class="title">Deploy files</text>
+      <text x="1088" y="562" class="small mono">compose.yaml</text>
+      <text x="1088" y="582" class="small mono">secrets.compose.yaml</text>
+      <text x="1088" y="604" class="small muted">in deploy/wl-acme-dev-001/</text>
+      <text x="1088" y="622" class="small muted">spec in workloads/*.yaml</text>
+
+      <!-- keychain -->
+      <rect x="440" y="658" width="916" height="92" rx="8" class="secret"/>
+      <text x="456" y="682" class="label t-secret">OS keychain, outside state.db · 8 secret values</text>
+      <text x="456" y="704" class="small mono"><tspan class="muted">auth</tspan> DATABASE_URL, SMTP_PASS<tspan class="muted" dx="22">orders</tspan> AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, DATABASE_URL</text>
+      <text x="456" y="724" class="small mono"><tspan class="muted">gateway</tspan> DATABASE_URL<tspan class="muted" dx="22">worker</tspan> DATABASE_URL<tspan class="muted" dx="22">postgres</tspan> POSTGRES_PASSWORD</text>
+      <text x="456" y="742" class="small mono muted">key: org/acme/workload/wl-acme-dev-001/&lt;service&gt;</text>
+    </svg>
+  </div>
+</div>
+</body>
+</html>
