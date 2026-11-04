@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO redirects (workload_id, host, to_url, permanent, tls, created_at)\n               VALUES (?, ?, ?, ?, ?, ?) RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a1b8cf0499e9f8f315f4e31f04c9264ba2cb0b6f6dc90fa130520c9006cfdd80"
+}

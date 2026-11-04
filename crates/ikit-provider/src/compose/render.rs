@@ -14,6 +14,8 @@ pub struct ServiceInput {
     pub spec: ServiceSpec,
     /// Secret env values from the keychain.
     pub secrets: BTreeMap<String, String>,
+    /// URLs the service answers on through the target's reverse proxy, first route first.
+    pub urls: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,7 +210,7 @@ fn direct_value(s: &ServiceInput, var: &EnvVar) -> Option<Resolved> {
     })
 }
 
-/// Resolves `service:<name>.host | .port | .port.<port name> | .env.<VAR>`. `<name>` is a
+/// Resolves `service:<name>.host | .port | .port.<port name> | .env.<VAR> | .url`. `<name>` is a
 /// service instance, or a registry service if exactly one instance uses it. A `.host` must
 /// be on a network that a service in `from` joins.
 fn resolve_ref(
@@ -274,6 +276,13 @@ fn resolve_ref(
                 target.instance.name
             )),
         },
+        None if field == "url" => match target.urls.first() {
+            Some(url) => plain(url.clone()),
+            None => Err(format!(
+                "`{}` has no route; add one with `ikit route add {}`",
+                target.instance.name, target.instance.name
+            )),
+        },
         Some(("env", var)) => {
             let spec_var = target
                 .spec
@@ -283,7 +292,7 @@ fn resolve_ref(
                 .ok_or_else(|| format!("`{}` env var {var} has no value", target.instance.name))
         }
         _ => Err(format!(
-            "unknown field `{field}` in `{reference}` (use host, port, port.<name> or env.<VAR>)"
+            "unknown field `{field}` in `{reference}` (use host, port, port.<name>, env.<VAR> or url)"
         )),
     }
 }
@@ -665,11 +674,13 @@ pub(crate) mod tests {
                     instance: pg,
                     spec: pg_spec,
                     secrets: BTreeMap::from([("POSTGRES_PASSWORD".into(), "pa$$word".into())]),
+                    urls: vec![],
                 },
                 ServiceInput {
                     instance: api,
                     spec: api_spec,
                     secrets: BTreeMap::new(),
+                    urls: vec![],
                 },
             ],
             zerotier: None,
@@ -825,6 +836,21 @@ pub(crate) mod tests {
         });
         let c = yaml(&render(&input).unwrap().compose);
         assert_eq!(c["services"]["postgres"]["environment"]["API_PORT"], "8080");
+
+        // A URL comes from the service's first route.
+        input.services[1].spec.env.push(EnvVar {
+            name: "PUBLIC_URL".into(),
+            from: Some("service:orders-api.url".into()),
+            ..Default::default()
+        });
+        let err = render(&input).unwrap_err().to_string();
+        assert!(err.contains("has no route"), "{err}");
+        input.services[1].urls = vec!["https://api.acme.com".into()];
+        let c = yaml(&render(&input).unwrap().compose);
+        assert_eq!(
+            c["services"]["orders-api"]["environment"]["PUBLIC_URL"],
+            "https://api.acme.com"
+        );
     }
 
     #[test]

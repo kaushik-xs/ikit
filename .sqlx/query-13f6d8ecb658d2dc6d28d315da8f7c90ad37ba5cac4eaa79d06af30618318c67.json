@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT config_json AS \"config_json: Json<AutoRoutes>\"\n               FROM auto_routes WHERE workload_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "config_json: Json<AutoRoutes>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "13f6d8ecb658d2dc6d28d315da8f7c90ad37ba5cac4eaa79d06af30618318c67"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO auto_routes (workload_id, config_json, updated_at)\n                       VALUES (?, ?, ?)\n                       ON CONFLICT (workload_id) DO UPDATE\n                       SET config_json = excluded.config_json, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9d96631e2e7cd7dd80b6ba04a9e411debe2eeb4bf0d097c47b2c8ee05567fa1d"
+}

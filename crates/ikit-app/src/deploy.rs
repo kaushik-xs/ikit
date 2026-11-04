@@ -43,6 +43,9 @@ pub struct DeployPlan {
     pub hooks: Vec<HookPlan>,
     /// Reasons `apply` will refuse to run, e.g. unpinned images in a prod env.
     pub blockers: Vec<String>,
+    /// The workload's site on the target's reverse proxy, if it has routes (or had).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<crate::EdgePlan>,
     #[serde(skip)]
     pub rendered: Rendered,
 }
@@ -52,6 +55,7 @@ impl DeployPlan {
     pub fn needs_apply(&self) -> bool {
         !self.plan.is_empty()
             || self.status != WorkloadStatus::Applied
+            || self.edge.as_ref().is_some_and(|e| !e.changes.is_empty())
             || self
                 .hooks
                 .iter()
@@ -360,12 +364,18 @@ impl App {
     /// The workload's compose files, with secret values read from the keychain.
     pub async fn render_workload(&self, workload: &str) -> Result<Rendered> {
         let detail = self.workload_show(workload).await?;
+        let mut route_publishes = self.route_publishes(&detail.workload).await?;
+        let mut urls = self.route_urls(workload).await?;
         let mut specs = BTreeMap::new();
         for entry in self.store.registry().list().await? {
             specs.extend(entry.versions.into_iter().map(|v| (v.id, v.spec)));
         }
         let mut services = Vec::new();
-        for instance in detail.services {
+        for mut instance in detail.services {
+            // Routed ports are published on the host's loopback for the reverse proxy.
+            instance
+                .publish
+                .extend(route_publishes.remove(&instance.name).unwrap_or_default());
             let secrets: BTreeMap<String, String> = if instance.secret_env.is_empty() {
                 BTreeMap::new()
             } else {
@@ -382,6 +392,7 @@ impl App {
             };
             let spec = specs.remove(&instance.version_id).unwrap_or_default();
             services.push(ServiceInput {
+                urls: urls.remove(&instance.name).unwrap_or_default(),
                 instance,
                 spec,
                 secrets,
@@ -440,6 +451,8 @@ impl App {
         }
         blockers.extend(self.port_clashes(&wl).await?);
         blockers.extend(self.docker_network_blockers(&wl, &place).await?);
+        let (edge, edge_blockers) = self.edge_plan(&wl, &target).await?;
+        blockers.extend(edge_blockers);
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -447,6 +460,7 @@ impl App {
             plan,
             hooks,
             blockers,
+            edge,
             rendered,
         })
     }
@@ -539,7 +553,10 @@ impl App {
         if let Some(b) = plan.blockers.first() {
             return Err(AppError::Invalid(b.clone()));
         }
-        if plan.plan != expected.plan || plan.rendered != expected.rendered {
+        if plan.plan != expected.plan
+            || plan.rendered != expected.rendered
+            || plan.edge.as_ref().map(|e| &e.changes) != expected.edge.as_ref().map(|e| &e.changes)
+        {
             return Err(AppError::Invalid(format!(
                 "{} changed since it was planned; run `ikit plan` and apply again",
                 wl.name
@@ -591,6 +608,10 @@ impl App {
             let out = self.compose(&place, &wl.name, &args, DEPLOY).await?;
             if !out.success() {
                 return Err(failed("docker compose up", &out));
+            }
+            // The proxy switches over once the services are up and healthy.
+            if let Some(edge) = &plan.edge {
+                self.edge_apply(&target, edge).await?;
             }
             // Authorized before post-apply hooks, which may reach the workload over ZeroTier.
             let zerotier = match self.zt_sidecar_network(&wl.name).await? {
@@ -715,6 +736,8 @@ impl App {
                             .map(|node| (n, node)),
                         _ => None,
                     };
+                    // Stop sending traffic before the containers go.
+                    self.edge_remove_site(&target, workload).await?;
                     let mut args = vec!["down", "--remove-orphans"];
                     if volumes {
                         args.push("--volumes");

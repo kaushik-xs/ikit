@@ -155,6 +155,8 @@ pub struct Target {
     pub status: TargetStatus,
     pub last_checked_at: Option<DateTime<Utc>>,
     pub last_checks: Vec<Check>,
+    /// This org's reverse proxy on the host, once installed or joined.
+    pub edge: Option<crate::EdgeConfig>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

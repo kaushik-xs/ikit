@@ -215,6 +215,31 @@ pub struct ServicePublishArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RouteAddArgs {
+    pub workload: String,
+    pub service: String,
+    /// Domain; default: the org's host template under `edge.base_domain`.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Path prefix such as /api, stripped before proxying.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Container port number or registry port name; default: the port named http.
+    #[serde(default)]
+    pub port: Option<String>,
+    /// acme, internal or off; default: the org's edge.default_tls.
+    #[serde(default)]
+    pub tls: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RouteRemoveArgs {
+    pub workload: String,
+    /// `host` or `host/path`.
+    pub route: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SqlHookAddArgs {
     pub workload: String,
     /// Hook name, a lowercase slug.
@@ -343,6 +368,19 @@ impl IkitServer {
             .await
             .map_err(|e| e.to_string())?;
         json(&serde_json::json!({ "workload": detail, "unmet_dependencies": unmet }))
+    }
+
+    #[tool(
+        description = "List a workload's routes (domains the target's reverse proxy sends to its services, with URLs and TLS mode), redirects and automatic-route settings."
+    )]
+    async fn route_list(
+        &self,
+        Parameters(args): Parameters<WorkloadArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        self.scope(&ext).check(&args.workload)?;
+        let app = self.app().await?;
+        json(&app.route_list(&args.workload).await.map_err(err)?)
     }
 
     #[tool(
@@ -631,6 +669,47 @@ impl IkitServer {
             .collect::<Result<Vec<_>, _>>()?;
         json(
             &app.service_publish(&args.workload, &args.service, add, &args.remove)
+                .await
+                .map_err(err)?,
+        )
+    }
+
+    #[tool(
+        description = "Route a domain (and optional path prefix) to a service through the target's reverse proxy, with an automatic certificate. The target needs a proxy (`ikit target edge install`). Needs `mutate` in mcp.yaml. Takes effect on the next apply."
+    )]
+    async fn route_add(
+        &self,
+        Parameters(args): Parameters<RouteAddArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
+        let tls = args
+            .tls
+            .as_deref()
+            .map(str::parse::<ikit_core::TlsMode>)
+            .transpose()
+            .map_err(err)?;
+        let req = ikit_app::RouteRequest {
+            service: args.service,
+            port: args.port,
+            host: args.host,
+            path: args.path,
+            tls,
+        };
+        json(&app.route_add(&args.workload, req).await.map_err(err)?)
+    }
+
+    #[tool(
+        description = "Remove a route (`host` or `host/path`) from a workload. Needs `mutate` in mcp.yaml. Takes effect on the next apply."
+    )]
+    async fn route_remove(
+        &self,
+        Parameters(args): Parameters<RouteRemoveArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
+        json(
+            &app.route_remove(&args.workload, &args.route)
                 .await
                 .map_err(err)?,
         )
@@ -1049,6 +1128,9 @@ mod tests {
                 "registry_list",
                 "registry_outdated",
                 "registry_show",
+                "route_add",
+                "route_list",
+                "route_remove",
                 "service_add",
                 "service_publish",
                 "service_set_env",

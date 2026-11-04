@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM routes WHERE workload_id = ? AND host = ? AND path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "605ff6076a28e836db9d70d6aa03f61fe8e12097611420e0713564ec963ac1e8"
+}

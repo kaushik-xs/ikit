@@ -2,3 +2,4 @@
 //! Kubernetes manifests join in Phase 5. Everything here is pure: no I/O.
 
 pub mod compose;
+pub mod edge;

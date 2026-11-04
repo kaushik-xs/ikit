@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM redirects WHERE workload_id = ? AND host = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "712de5368a78e55a796c9bccc76b92fbad69fddfec783e6ceb745e85202f46c5"
+}

@@ -29,6 +29,9 @@ pub enum TargetCmd {
         #[arg(long)]
         no_test: bool,
     },
+    /// Manage the reverse proxy (Caddy or Ferron) on a VM target's host.
+    #[command(subcommand)]
+    Edge(crate::cmd::edge::EdgeCmd),
     /// Remove an attached target from ikit (the host or cluster is not touched).
     Detach {
         name: String,
@@ -217,6 +220,7 @@ pub async fn run(ctx: &Ctx, cmd: TargetCmd) -> anyhow::Result<()> {
                 );
             }
         }
+        TargetCmd::Edge(cmd) => crate::cmd::edge::run(ctx, &app, cmd).await?,
         TargetCmd::Detach { name, yes } => {
             if ctx.confirm(&format!("Detach target {name} from ikit?"), yes)? {
                 app.target_detach(&name).await?;
@@ -241,6 +245,19 @@ fn render(ctx: &Ctx, target: &Target) -> anyhow::Result<()> {
     ]);
     t.add_row(vec!["connection".to_owned(), target.connection.describe()]);
     t.add_row(vec!["status".to_owned(), target.status.to_string()]);
+    if let Some(e) = &target.edge {
+        t.add_row(vec![
+            "reverse proxy".to_owned(),
+            format!(
+                "{}{}",
+                e.kind,
+                e.version
+                    .as_deref()
+                    .map(|v| format!(" {v}"))
+                    .unwrap_or_default()
+            ),
+        ]);
+    }
     println!("{t}");
     if !target.last_checks.is_empty() {
         let mut t = table(&["CHECK", "RESULT", "DETAIL"]);

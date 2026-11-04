@@ -2,6 +2,7 @@
 
 use ikit_app::{App, ContainerStatus, DeployPlan, DriftReport};
 use ikit_provider::compose::Change;
+use ikit_provider::edge::EdgeChange;
 
 use crate::output::{Output, print_json, table};
 use crate::{Ctx, warn};
@@ -81,6 +82,13 @@ pub async fn apply(ctx: &Ctx, yes: bool, allow_changed: bool, force: bool) -> an
         );
     }
     print_outcomes(&report.hooks_ran);
+    let routes = app.route_list(&wl).await?.routes;
+    if !routes.is_empty() {
+        println!("Live at:");
+        for r in &routes {
+            println!("  {} → {}", r.url(), r.service);
+        }
+    }
     Ok(())
 }
 
@@ -247,6 +255,20 @@ fn print_plan(p: &DeployPlan) {
         }
     }
     print_hooks(p);
+    if let Some(e) = &p.edge {
+        for c in &e.changes {
+            match c {
+                EdgeChange::Add { site, detail } => {
+                    println!("  + {site:<20} {detail} ({})", e.kind)
+                }
+                EdgeChange::Update { site, detail } => println!("  ~ {site:<20} {detail}"),
+                EdgeChange::Remove { site } => println!("  - {site:<20} off the {} proxy", e.kind),
+            }
+        }
+        for w in &e.warnings {
+            warn(w);
+        }
+    }
     for b in &p.blockers {
         warn(format!("apply is blocked: {b}"));
     }

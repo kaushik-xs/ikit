@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", name, kind, origin,\n                      connection_json AS \"connection_json: Json<Connection>\", status,\n                      last_checked_at AS \"last_checked_at: DateTime<Utc>\",\n                      last_check_json AS \"last_check_json: Json<Vec<Check>>\",\n                      created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM targets ORDER BY name",
+  "query": "SELECT id AS \"id!\", name, kind, origin,\n                      connection_json AS \"connection_json: Json<Connection>\", status,\n                      last_checked_at AS \"last_checked_at: DateTime<Utc>\",\n                      last_check_json AS \"last_check_json: Json<Vec<Check>>\",\n                         edge_json AS \"edge_json?: Json<EdgeConfig>\",\n                      created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM targets WHERE name = ?",
   "describe": {
     "columns": [
       {
@@ -44,18 +44,23 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at: DateTime<Utc>",
+        "name": "edge_json?: Json<EdgeConfig>",
         "ordinal": 8,
         "type_info": "Text"
       },
       {
-        "name": "updated_at: DateTime<Utc>",
+        "name": "created_at: DateTime<Utc>",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       true,
@@ -66,9 +71,10 @@
       false,
       true,
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "1f67c965488d9242689506d1f91601b44d8f9c636b811b931ef12ca4428f6e5d"
+  "hash": "c1de5d50b66d7d9760054f355774ea5f656a17144b79dd6f24c9f389e3d611b4"
 }

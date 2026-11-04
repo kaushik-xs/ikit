@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM auto_routes WHERE workload_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8fe0953ab54e8bb4322018d6989fe21a4096a3f23eaea7911c2a004db655fbc1"
+}

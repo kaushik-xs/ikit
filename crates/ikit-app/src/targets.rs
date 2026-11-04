@@ -149,6 +149,11 @@ impl App {
                 self.probe_k8s(&base).await
             }
         });
+        if checks.iter().all(|c| c.ok)
+            && let Some(check) = self.edge_check(&target).await
+        {
+            checks.push(check);
+        }
         let status = if checks.iter().all(|c| c.ok) {
             TargetStatus::Ready
         } else {

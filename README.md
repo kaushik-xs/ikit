@@ -98,6 +98,17 @@ ikit net zt rm dev-net [--delete]                  # --delete also deletes it in
 
 ikit net docker attach regere-dev-platform-network --group app   # join a network ikit does not own
 ikit net docker list | detach regere-dev-platform-network [--group app]
+
+ikit target edge install box caddy --email ops@acme.com   # or ferron; picked interactively if omitted
+ikit target edge install box                       # another org: joins the proxy already there
+ikit target edge status box | reload box | upgrade box [--version 2.11.8]
+ikit target edge uninstall box [--purge]           # this org leaves; the last one removes ikit
+ikit route add web --host acme.com                 # https://acme.com → web's `http` port
+ikit route add api --host acme.com --path /api --port 8080
+ikit route add admin --tls internal                # host from edge.host_template; proxy's own CA
+ikit route redirect www.acme.com https://acme.com
+ikit route auto on --groups app                    # a route per app service with an `http` port
+ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
 ```
 
 ### Backups
@@ -122,13 +133,49 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
 - `compose.yaml` holds everything except secret values; they go to `secrets.compose.yaml`. Both
   files are owner-only (0600). `$` in values is escaped, so passwords reach containers verbatim.
 - Env values come from the registry defaults, values set with `ikit svc set`, the keychain, and
-  `from:` references (`service:<name>.host`, `.port`, `.port.<name>`, `.env.<VAR>`).
+  `from:` references (`service:<name>.host`, `.port`, `.port.<name>`, `.env.<VAR>`, and
+  `.url`, the service's first route).
 - Several workloads can share a target: each is its own Compose project with its own network.
   `plan` blocks a host port that another applied (or failed) workload on the same target
   already publishes, unless both bind different addresses. Ports taken by other orgs or by
   anything else on the host still fail at `docker compose up`.
 - Each apply or destroy holds a per-workload lock and is recorded in the run history. A workload
   must be destroyed before `ikit wl rm` removes it. Kubernetes targets arrive in Phase 5.
+
+### Reverse proxy and routes
+
+- `target edge install` puts Caddy or Ferron on a Linux VM target's host (not in a container),
+  as a systemd service that owns ports 80 and 443. It needs root or passwordless `sudo` there.
+  ikit installs from the official apt (Debian/Ubuntu) or dnf (RHEL/Fedora) repository and
+  replaces the main config with one that includes `/etc/ikit/edge/sites/*.conf`, keeping the
+  original as `<config>.ikit-orig`. `--open-firewall` allows 80/443 in ufw or firewalld.
+- A proxy that is already installed is adopted: ikit appends its include line to the existing
+  config and leaves the rest alone, and `uninstall` only takes that line out again. Another
+  server on 80/443 (nginx, a container) makes `install` refuse.
+- One proxy serves every org on the host. `/etc/ikit/edge/host.json` records the server and the
+  orgs that joined; a second org's `install` joins it (`--exclusive` keeps others off). Each
+  workload has its own site file whose header names its org, workload, domains and upstream
+  ports, so `plan` blocks a domain another org already serves, and the write on apply re-checks
+  it under the host's lock. `uninstall` takes this org off; the last org stops a proxy ikit
+  installed (`--purge` removes the package).
+- `upgrade` updates the package for everyone on the host, checks the config with the new
+  version and restarts it; if the config is rejected or the service does not come back, the
+  previous version is reinstalled.
+- `route add` sends a domain (and an optional path prefix, stripped before proxying) to a service
+  port. ikit publishes that port on `127.0.0.1` at an upstream port from `edge.upstream_ports`
+  (default 20000-29999), so it is only reachable through the proxy. Without `--host`, the
+  domain comes from `edge.host_template` (default `{service}.{workload}.{base_domain}`) and
+  `edge.base_domain` in the org's `config.yaml`. TLS modes: `acme` (default; the domain must
+  resolve to the host), `internal` (the proxy's own CA, for private or ZeroTier-only hosts) and
+  `off`. Envs in `edge.require_tls_envs` (default `[prod]`) refuse `off`.
+- `route auto on` keeps a route for every service in the chosen groups that has a registry port
+  named `http` (or `--port-name`); routes follow `sg add`, `svc rm` and `svc upgrade`, and one
+  removed by hand is not added back. `edge.auto_routes` in `config.yaml` turns this on for new
+  workloads. Manual routes always win.
+- `plan` shows site changes next to the Compose changes, and warns about domains that do not
+  resolve. `apply` switches the proxy over once the containers are healthy (a config the proxy
+  rejects keeps the previous site); `destroy` takes the site down before stopping containers.
+  `status --drift` reports a stopped proxy or a missing site file.
 
 ### Networks
 
@@ -211,9 +258,9 @@ SQL hooks:
 
 `ikit mcp serve` serves one org over stdio. Read tools: `workload_list`, `workload_show`,
 `target_list`, `registry_list`, `registry_show`, `registry_outdated`, `hook_list`, `deploy_plan`,
-`deploy_status`, `deploy_drift`, `workload_runs`. Prompts: `diagnose_workload`, `plan_upgrades`
-and `review_plan`. Definition tools (`workload_create`, `service_add`, `service_set_env`,
-`service_publish`, `hook_add_sql`) and deploy tools (`deploy_apply`, `deploy_destroy`) only work
+`deploy_status`, `deploy_drift`, `workload_runs`, `route_list`. Prompts: `diagnose_workload`,
+`plan_upgrades` and `review_plan`. Definition tools (`workload_create`, `service_add`,
+`service_set_env`, `service_publish`, `hook_add_sql`, `route_add`, `route_remove`) and deploy tools (`deploy_apply`, `deploy_destroy`) only work
 where `orgs/<org>/mcp.yaml` allows them:
 
 ```yaml

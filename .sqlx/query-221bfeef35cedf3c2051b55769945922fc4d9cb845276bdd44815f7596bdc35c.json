@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id AS \"id!\", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,\n                      r.upstream_port, r.origin, r.created_at AS \"created_at: DateTime<Utc>\"\n               FROM routes r JOIN workloads w ON w.id = r.workload_id\n               WHERE r.workload_id = ? ORDER BY r.host, r.path",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "workload",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "service",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "port",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "host",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "path",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "tls",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "upstream_port",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "origin",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "221bfeef35cedf3c2051b55769945922fc4d9cb845276bdd44815f7596bdc35c"
+}

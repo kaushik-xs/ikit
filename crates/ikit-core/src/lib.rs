@@ -41,6 +41,7 @@ macro_rules! string_enum {
 }
 
 pub mod config;
+pub mod edge;
 pub mod hook;
 pub mod network;
 pub mod profile;
@@ -50,7 +51,10 @@ pub mod target;
 pub mod version;
 pub mod workload;
 
-pub use config::Config;
+pub use config::{AutoRouteDefaults, Config, EdgeDefaults};
+pub use edge::{
+    AcmeCa, AutoRoutes, EdgeConfig, EdgeKind, HostManifest, Redirect, Route, RouteOrigin, TlsMode,
+};
 pub use hook::{
     Hook, HookAction, HookKind, HookPhase, HookRunRecord, HttpAction, McpAction, ScriptState,
     ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia,

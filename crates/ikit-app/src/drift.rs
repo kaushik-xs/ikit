@@ -29,6 +29,8 @@ pub enum DriftKind {
     Modified,
     /// A container in the project that the applied files do not define.
     Extra,
+    /// The target's reverse proxy is gone or stopped, or the workload's site is missing.
+    Proxy,
 }
 
 impl std::fmt::Display for DriftKind {
@@ -40,6 +42,7 @@ impl std::fmt::Display for DriftKind {
             Self::Unhealthy => "unhealthy",
             Self::Modified => "modified",
             Self::Extra => "extra",
+            Self::Proxy => "proxy",
         })
     }
 }
@@ -92,6 +95,13 @@ impl App {
             unapplied,
             items: vec![],
         };
+        for detail in self.edge_drift(&wl, &target).await? {
+            report.items.push(DriftItem {
+                service: "*".into(),
+                kind: DriftKind::Proxy,
+                detail,
+            });
+        }
         if self.read_file(&place, COMPOSE_FILE).await?.is_none() {
             if wl.status == WorkloadStatus::Applied {
                 report.items.push(DriftItem {

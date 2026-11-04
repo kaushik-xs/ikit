@@ -9,6 +9,7 @@ use ikit_core::registry::{
     ImportMode, ImportReport, RegistryLogin, ServiceDef, Source, Usage, VersionDef,
 };
 use ikit_core::target::{Check, TargetOrigin};
+use ikit_core::{AutoRoutes, EdgeConfig, Redirect, Route, RouteOrigin, TlsMode};
 use ikit_core::{
     Backup, Category, Connection, DockerNetwork, Hook, HookAction, HookPhase, HookRunRecord,
     Network, NetworkOrigin, Profile, ProfileKind, PublishedPort, RegistryEntry, RegistryVersion,
@@ -31,6 +32,7 @@ pub trait StateStore: Send + Sync {
     fn hooks(&self) -> &dyn HookRepo;
     fn storage(&self) -> &dyn StorageRepo;
     fn networks(&self) -> &dyn NetworkRepo;
+    fn edge(&self) -> &dyn EdgeRepo;
 }
 
 #[async_trait]
@@ -109,6 +111,8 @@ pub trait TargetRepo: Send + Sync {
     async fn update_connection(&self, name: &str, connection: &Connection) -> Result<()>;
     async fn record_checks(&self, name: &str, status: TargetStatus, checks: &[Check])
     -> Result<()>;
+    /// Sets or clears this org's reverse proxy on the target.
+    async fn set_edge(&self, name: &str, edge: Option<&EdgeConfig>) -> Result<()>;
     /// Fails with [`StateError::InUse`] while workloads run on the target.
     async fn delete(&self, name: &str) -> Result<bool>;
 }
@@ -215,6 +219,48 @@ pub trait NetworkRepo: Send + Sync {
     ) -> Result<u64>;
     /// A workload's external Docker networks, by name then group.
     async fn docker_networks(&self, workload_id: i64) -> Result<Vec<DockerNetwork>>;
+}
+
+#[async_trait]
+pub trait EdgeRepo: Send + Sync {
+    /// A workload's routes by host, then path.
+    async fn routes(&self, workload_id: i64) -> Result<Vec<Route>>;
+    /// Every route in the org with its workload's name.
+    async fn all_routes(&self) -> Result<Vec<(String, Route)>>;
+    /// Fails with `Conflict` if the workload already routes the host and path.
+    async fn insert_route(&self, workload_id: i64, new: NewRoute<'_>) -> Result<Route>;
+    /// Returns whether the route existed.
+    async fn delete_route(&self, workload_id: i64, host: &str, path: Option<&str>) -> Result<bool>;
+    /// Removes a service's routes, e.g. when the service is removed.
+    async fn delete_service_routes(&self, workload_id: i64, service: &str) -> Result<u64>;
+    async fn redirects(&self, workload_id: i64) -> Result<Vec<Redirect>>;
+    /// Every redirect in the org with its workload's name.
+    async fn all_redirects(&self) -> Result<Vec<(String, Redirect)>>;
+    /// Fails with `Conflict` if the workload already redirects the host.
+    async fn insert_redirect(&self, workload_id: i64, new: NewRedirect<'_>) -> Result<Redirect>;
+    async fn delete_redirect(&self, workload_id: i64, host: &str) -> Result<bool>;
+    async fn auto_routes(&self, workload_id: i64) -> Result<Option<AutoRoutes>>;
+    /// Turns automatic routes on (or updates them) or off. Existing routes are untouched.
+    async fn set_auto_routes(&self, workload_id: i64, auto: Option<&AutoRoutes>) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewRoute<'a> {
+    pub service: &'a str,
+    pub port: u16,
+    pub host: &'a str,
+    pub path: Option<&'a str>,
+    pub tls: TlsMode,
+    pub upstream_port: u16,
+    pub origin: RouteOrigin,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewRedirect<'a> {
+    pub host: &'a str,
+    pub to: &'a str,
+    pub permanent: bool,
+    pub tls: TlsMode,
 }
 
 #[derive(Debug, Clone, Copy)]

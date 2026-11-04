@@ -7,10 +7,11 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
 use crate::{
-    HookRepo, NetworkRepo, ProfileRepo, RegistryRepo, Result, StateStore, StorageRepo, TargetRepo,
-    WorkloadRepo,
+    EdgeRepo, HookRepo, NetworkRepo, ProfileRepo, RegistryRepo, Result, StateStore, StorageRepo,
+    TargetRepo, WorkloadRepo,
 };
 
+mod edge;
 mod hooks;
 mod networks;
 mod profiles;
@@ -29,6 +30,7 @@ pub struct SqliteStore {
     hooks: hooks::SqliteHooks,
     storage: storage::SqliteStorage,
     networks: networks::SqliteNetworks,
+    edge: edge::SqliteEdge,
 }
 
 /// What [`SqliteStore::open`] did to the database file.
@@ -88,7 +90,8 @@ impl SqliteStore {
             workloads: workloads::SqliteWorkloads::new(pool.clone()),
             hooks: hooks::SqliteHooks::new(pool.clone()),
             storage: storage::SqliteStorage::new(pool.clone()),
-            networks: networks::SqliteNetworks::new(pool),
+            networks: networks::SqliteNetworks::new(pool.clone()),
+            edge: edge::SqliteEdge::new(pool),
         };
         Ok((
             store,
@@ -128,6 +131,10 @@ impl StateStore for SqliteStore {
 
     fn networks(&self) -> &dyn NetworkRepo {
         &self.networks
+    }
+
+    fn edge(&self) -> &dyn EdgeRepo {
+        &self.edge
     }
 }
 

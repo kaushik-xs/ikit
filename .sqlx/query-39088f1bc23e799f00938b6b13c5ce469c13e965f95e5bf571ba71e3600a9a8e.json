@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", name, kind, origin,\n                      connection_json AS \"connection_json: Json<Connection>\", status,\n                      last_checked_at AS \"last_checked_at: DateTime<Utc>\",\n                      last_check_json AS \"last_check_json: Json<Vec<Check>>\",\n                      created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM targets WHERE name = ?",
+  "query": "INSERT INTO targets (name, kind, origin, connection_json, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", name, kind, origin,\n                         connection_json AS \"connection_json: Json<Connection>\", status,\n                         last_checked_at AS \"last_checked_at: DateTime<Utc>\",\n                         last_check_json AS \"last_check_json: Json<Vec<Check>>\",\n                         edge_json AS \"edge_json?: Json<EdgeConfig>\",\n                         created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"",
   "describe": {
     "columns": [
       {
@@ -44,31 +44,37 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at: DateTime<Utc>",
+        "name": "edge_json?: Json<EdgeConfig>",
         "ordinal": 8,
         "type_info": "Text"
       },
       {
-        "name": "updated_at: DateTime<Utc>",
+        "name": "created_at: DateTime<Utc>",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 6
     },
     "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       true,
       false,
-      false,
-      false,
-      false,
-      false,
       true,
-      false,
       false,
       false
     ]
   },
-  "hash": "c478b8f4d80abf23cb901648382c2ca6d2c955cf70c320fc03614dfb87077c78"
+  "hash": "39088f1bc23e799f00938b6b13c5ce469c13e965f95e5bf571ba71e3600a9a8e"
 }

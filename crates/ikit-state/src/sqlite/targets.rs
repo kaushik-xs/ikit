@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ikit_core::target::{Check, TargetOrigin};
-use ikit_core::{Connection, Target, TargetStatus};
+use ikit_core::{Connection, EdgeConfig, Target, TargetStatus};
 use sqlx::SqlitePool;
 use sqlx::types::Json;
 
@@ -26,6 +26,7 @@ struct TargetRow {
     status: String,
     last_checked_at: Option<DateTime<Utc>>,
     last_check_json: Json<Vec<Check>>,
+    edge_json: Option<Json<EdgeConfig>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -45,6 +46,7 @@ impl TryFrom<TargetRow> for Target {
             connection: r.connection_json.0,
             last_checked_at: r.last_checked_at,
             last_checks: r.last_check_json.0,
+            edge: r.edge_json.map(|e| e.0),
             created_at: r.created_at,
             updated_at: r.updated_at,
         })
@@ -71,6 +73,7 @@ impl TargetRepo for SqliteTargets {
                          connection_json AS "connection_json: Json<Connection>", status,
                          last_checked_at AS "last_checked_at: DateTime<Utc>",
                          last_check_json AS "last_check_json: Json<Vec<Check>>",
+                         edge_json AS "edge_json?: Json<EdgeConfig>",
                          created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>""#,
             name,
             kind,
@@ -92,6 +95,7 @@ impl TargetRepo for SqliteTargets {
                       connection_json AS "connection_json: Json<Connection>", status,
                       last_checked_at AS "last_checked_at: DateTime<Utc>",
                       last_check_json AS "last_check_json: Json<Vec<Check>>",
+                         edge_json AS "edge_json?: Json<EdgeConfig>",
                       created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>"
                FROM targets WHERE name = ?"#,
             name,
@@ -109,6 +113,7 @@ impl TargetRepo for SqliteTargets {
                       connection_json AS "connection_json: Json<Connection>", status,
                       last_checked_at AS "last_checked_at: DateTime<Utc>",
                       last_check_json AS "last_check_json: Json<Vec<Check>>",
+                         edge_json AS "edge_json?: Json<EdgeConfig>",
                       created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>"
                FROM targets ORDER BY name"#,
         )
@@ -152,6 +157,23 @@ impl TargetRepo for SqliteTargets {
             status,
             checks,
             now,
+            now,
+            name,
+        )
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StateError::NotFound(format!("target {name}")));
+        }
+        Ok(())
+    }
+
+    async fn set_edge(&self, name: &str, edge: Option<&EdgeConfig>) -> Result<()> {
+        let json = edge.map(Json);
+        let now = Utc::now();
+        let result = sqlx::query!(
+            "UPDATE targets SET edge_json = ?, updated_at = ? WHERE name = ?",
+            json,
             now,
             name,
         )

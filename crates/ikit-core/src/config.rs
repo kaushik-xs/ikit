@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::edge::{TlsMode, is_hostname};
+use crate::registry::Category;
 use crate::workload::is_env;
 
 /// Contents of an org's `config.yaml`.
@@ -15,6 +17,65 @@ pub struct Config {
     /// Envs whose deploys must use digest-pinned images (`ikit registry version pin`).
     #[serde(default = "default_digest_envs")]
     pub require_digest_envs: Vec<String>,
+    /// Defaults for routes through a target's reverse proxy.
+    #[serde(default, skip_serializing_if = "EdgeDefaults::is_default")]
+    pub edge: EdgeDefaults,
+}
+
+/// The `edge:` section of `config.yaml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EdgeDefaults {
+    /// Domain that routes without an explicit host go under, e.g. `acme.dev`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_domain: Option<String>,
+    /// Host of a route without an explicit one: `{service}`, `{workload}`, `{env}`,
+    /// `{org}` and `{base_domain}` are filled in.
+    pub host_template: String,
+    pub default_tls: TlsMode,
+    /// Envs whose routes may not use `tls: off`.
+    pub require_tls_envs: Vec<String>,
+    /// Loopback host ports handed out to routed services, `[first, last]`.
+    pub upstream_ports: [u16; 2],
+    /// Turn on automatic routes for new workloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_routes: Option<AutoRouteDefaults>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoRouteDefaults {
+    #[serde(default = "default_auto_groups")]
+    pub groups: Vec<Category>,
+    #[serde(default = "default_port_name")]
+    pub port_name: String,
+}
+
+fn default_auto_groups() -> Vec<Category> {
+    vec![Category::App]
+}
+
+pub fn default_port_name() -> String {
+    "http".to_owned()
+}
+
+impl Default for EdgeDefaults {
+    fn default() -> Self {
+        Self {
+            base_domain: None,
+            host_template: "{service}.{workload}.{base_domain}".to_owned(),
+            default_tls: TlsMode::Acme,
+            require_tls_envs: default_digest_envs(),
+            upstream_ports: [20000, 29999],
+            auto_routes: None,
+        }
+    }
+}
+
+impl EdgeDefaults {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 fn default_digest_envs() -> Vec<String> {
@@ -34,6 +95,7 @@ impl Default for Config {
             prefix: legacy_prefix(),
             envs: DEFAULT_ENVS.map(String::from).to_vec(),
             require_digest_envs: default_digest_envs(),
+            edge: EdgeDefaults::default(),
         }
     }
 }
@@ -68,6 +130,27 @@ impl Config {
                 return Err(format!("env `{env}` is listed twice"));
             }
         }
+        if let Some(d) = &self.edge.base_domain
+            && !is_hostname(d)
+        {
+            return Err(format!(
+                "invalid edge.base_domain `{d}`: use a domain such as acme.dev"
+            ));
+        }
+        let [first, last] = self.edge.upstream_ports;
+        if first < 1024 || first > last {
+            return Err(format!(
+                "invalid edge.upstream_ports [{first}, {last}]: use a range above 1023, first <= last"
+            ));
+        }
+        if self
+            .edge
+            .auto_routes
+            .as_ref()
+            .is_some_and(|a| a.groups.is_empty())
+        {
+            return Err("edge.auto_routes.groups needs at least one group".to_owned());
+        }
         Ok(())
     }
 }
@@ -101,5 +184,23 @@ mod tests {
         assert!(bad(|c| c.envs.clear()));
         assert!(bad(|c| c.envs.push("dev".into())));
         assert!(bad(|c| c.envs.push("u-a-t".into())));
+        assert!(bad(|c| c.edge.base_domain = Some("dev".into())));
+        assert!(bad(|c| c.edge.upstream_ports = [80, 90]));
+    }
+
+    #[test]
+    fn edge_section_is_optional() {
+        let c: Config = serde_yaml_ng::from_str(
+            "envs: [dev]\nedge:\n  base_domain: acme.dev\n  auto_routes: {}\n",
+        )
+        .unwrap();
+        assert_eq!(c.edge.base_domain.as_deref(), Some("acme.dev"));
+        assert_eq!(c.edge.host_template, "{service}.{workload}.{base_domain}");
+        assert_eq!(c.edge.auto_routes.unwrap().groups, vec![Category::App]);
+        assert!(
+            !serde_yaml_ng::to_string(&Config::default())
+                .unwrap()
+                .contains("edge")
+        );
     }
 }

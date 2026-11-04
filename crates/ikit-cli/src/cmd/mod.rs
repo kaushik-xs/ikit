@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod deploy;
+pub mod edge;
 pub mod group;
 pub mod hook;
 pub mod init;
@@ -8,6 +9,7 @@ pub mod net;
 pub mod org;
 pub mod profile;
 pub mod registry;
+pub mod route;
 pub mod service;
 pub mod storage;
 pub mod target;

@@ -116,6 +116,9 @@ enum Command {
     /// Manage networks: ZeroTier networks, members and links to workloads.
     #[command(subcommand)]
     Net(cmd::net::NetCmd),
+    /// Route domains to the workload's services through the target's reverse proxy.
+    #[command(subcommand)]
+    Route(cmd::route::RouteCmd),
     /// Manage individual services in a workload.
     #[command(subcommand, name = "svc", alias = "service")]
     Service(cmd::service::ServiceCmd),
@@ -195,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Backup(c) => cmd::backup::run(&ctx, c).await,
         Command::Mcp(c) => cmd::mcp::run(&ctx, c).await,
         Command::Net(c) => cmd::net::run(&ctx, c).await,
+        Command::Route(c) => cmd::route::run(&ctx, c).await,
         Command::Render => cmd::deploy::render(&ctx).await,
         Command::Plan => cmd::deploy::plan(&ctx).await,
         Command::Apply {

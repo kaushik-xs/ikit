@@ -12,6 +12,7 @@ mod context;
 mod deploy;
 mod docker_networks;
 mod drift;
+mod edge;
 pub mod exec;
 mod hooks;
 mod hooks_sql;
@@ -25,6 +26,7 @@ mod registry;
 mod registry_auth;
 mod registry_edit;
 mod registry_ops;
+mod routes;
 pub mod secrets;
 mod services;
 mod storage;
@@ -36,6 +38,10 @@ pub use backup::BackupReport;
 pub use context::resolve_org;
 pub use deploy::{ApplyReport, ContainerStatus, DeployPlan};
 pub use drift::{DriftItem, DriftKind, DriftReport};
+pub use edge::{
+    EdgeInstallAction, EdgeInstallReport, EdgeInstallRequest, EdgePlan, EdgeSite, EdgeStatus,
+    EdgeUninstallAction, EdgeUninstallReport, EdgeUpgradeReport,
+};
 pub use exec::{Exec, ExecOutput, SystemExec};
 pub use hooks::{HookOutcome, HookPlan, HookRequest, NewHookRequest};
 pub use init::{InitReport, OrgInit, init};
@@ -50,6 +56,7 @@ pub use profiles::AddProfile;
 pub use registry::{AddVersion, Outdated, RegistryFilter};
 pub use registry_edit::{ServiceChanges, VersionChanges, VersionUpdate};
 pub use registry_ops::{ImageRef, SyncReport};
+pub use routes::{RouteList, RouteRequest};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore};
 pub use services::{AddServicesReport, ServiceRequest, UnmetDependency};
 pub use storage::{NewStorageRequest, ObjectEntry};

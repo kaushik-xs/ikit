@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id AS \"id!\", w.name AS workload, r.host, r.to_url,\n                      r.permanent AS \"permanent: bool\", r.tls,\n                      r.created_at AS \"created_at: DateTime<Utc>\"\n               FROM redirects r JOIN workloads w ON w.id = r.workload_id\n               ORDER BY w.name, r.host",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "workload",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "host",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "to_url",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "permanent: bool",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "tls",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9bab5a783d0cf584cb3c7e3c8af3b5dc9e42072e770733a6845973fe6458fc28"
+}

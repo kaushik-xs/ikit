@@ -65,6 +65,17 @@ impl App {
             .workloads()
             .create(&config.prefix, env, target.id)
             .await?;
+        if let Some(auto) = &config.edge.auto_routes {
+            let auto = ikit_core::AutoRoutes {
+                groups: auto.groups.clone(),
+                port_name: auto.port_name.clone(),
+                excluded: vec![],
+            };
+            self.store
+                .edge()
+                .set_auto_routes(workload.id, Some(&auto))
+                .await?;
+        }
         self.write_spec(&workload.name).await?;
         self.set_current_workload(Some(&workload.name))?;
         Ok(workload)

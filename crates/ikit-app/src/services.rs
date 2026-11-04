@@ -203,6 +203,8 @@ impl App {
         }
         self.write_spec(workload).await?;
 
+        self.after_services_changed(workload).await;
+
         let all = self.store.workloads().services(wl.id).await?;
         let added_names: BTreeSet<&str> = prepared.iter().map(|p| p.name.as_str()).collect();
         let specs = self.specs_for(&all).await?;
@@ -267,6 +269,8 @@ impl App {
             .update_service(wl.id, name, update)
             .await?;
         self.write_spec(workload).await?;
+        // The new version may name its ports differently.
+        self.after_services_changed(workload).await;
         let (updated, _) = self.service_show(workload, name).await?;
         Ok((service.version, updated))
     }
@@ -444,6 +448,7 @@ impl App {
             }
         }
         self.store.workloads().remove_services(wl.id, names).await?;
+        self.remove_service_routes(&wl, names).await?;
         for s in services
             .iter()
             .filter(|s| names.contains(&s.name) && !s.secret_env.is_empty())
