@@ -71,6 +71,10 @@ ikit storage test s3
 ikit backup run postgres [--storage s3] [--keep 7]
 ikit backup list | restore <id> | prune postgres --keep 7 | schedule postgres --cron "0 2 * * *"
 
+ikit org remote set --storage s3                  # share the org: state goes to <prefix>/state/<org>
+ikit org clone s3://backups/ikit/state/acme --aws-profile me --region eu-central-1   # a teammate joins
+ikit org status | pull [--discard] | unlock --force | remote show | remote rm
+
 ikit registry version pin postgres 16.6            # deploy as image@sha256:… (required for prod)
 ikit registry sync postgres [--add]                # newer version tags from the image registry
 ikit registry outdated [--current]                 # services behind the registry; exits 2 if any
@@ -120,6 +124,22 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
   `aws` profile can hold keys itself or name a profile in `~/.aws/credentials` with
   `--set aws_profile=<name>` (static keys only; SSO and assume-role profiles are not supported).
 - `backup schedule` prints a crontab line; ikit never edits your crontab.
+
+### Remote state
+
+- `org remote set` makes an org shared: its `state.db`, `config.yaml` and MCP files go to
+  `<storage prefix>/state/<org>/` as numbered snapshots (`snapshots/000042.tar.zst`), with
+  `HEAD.json` naming the current one. The local org folder becomes a cache of HEAD.
+- Commands that change state take `lock.json` (a 10-minute lease, renewed while they run), bring
+  the cache up to HEAD, run, and push a new generation if anything changed. HEAD is replaced
+  only by a conditional write, so a writer whose lock was broken cannot overwrite newer state.
+  Read-only commands take no lock and only pull. A waiting writer gives up after
+  `--lock-timeout` seconds (default 60) and names the holder.
+- Local changes that were never pushed block pulling over them; `org pull --discard` drops them.
+- The remote must be reachable without the org's keychain: use an `aws` profile with
+  `aws_profile`, a GCS credentials file, or the environment. Keychain secrets are not shared
+  yet, so each person sets them on their own machine. `ikit mcp serve` refuses remote orgs.
+- `remote.yaml` (where the remote is) and `sync.json` (the generation the cache is at) stay local.
 
 ### Digest pinning
 
@@ -314,6 +334,8 @@ State lives in `~/.ikit` (override with `--home` or `IKIT_HOME`). Each org is fu
     ├── config.yaml           # display name, workload prefix (default wl-<org>), envs
     ├── mcp.yaml              # what MCP clients may do (optional)
     ├── mcp-tokens.yaml       # hashes of MCP HTTP bearer tokens
+    ├── remote.yaml           # where the org's remote state lives (optional, never synced)
+    ├── sync.json             # the remote generation the local copy is at
     └── workloads/<name>.yaml # spec generated after every change (not read back yet)
 ```
 

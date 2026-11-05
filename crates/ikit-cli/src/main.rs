@@ -1,12 +1,16 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{ArgAction, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod access;
 mod cmd;
 mod output;
 
+use access::Access;
+use ikit_app::SyncOutcome;
 use output::Output;
 
 #[derive(Debug, Parser)]
@@ -35,6 +39,16 @@ struct Cli {
     /// Never prompt; fail instead when input is missing.
     #[arg(long, global = true)]
     no_input: bool,
+
+    /// Seconds to wait for another writer to release an org's remote lock.
+    #[arg(
+        long,
+        global = true,
+        env = "IKIT_LOCK_TIMEOUT",
+        value_name = "SECS",
+        default_value_t = 60
+    )]
+    lock_timeout: u64,
 
     /// Increase log verbosity (-v info, -vv debug, -vvv trace).
     #[arg(long, short, global = true, action = ArgAction::Count)]
@@ -184,31 +198,85 @@ async fn main() -> anyhow::Result<()> {
         interactive: !cli.no_input && std::io::stdin().is_terminal(),
     };
 
-    match cli.command {
-        Command::Init => cmd::init::run(&ctx).await,
-        Command::Org(c) => cmd::org::run(&ctx, c).await,
-        Command::Profile(c) => cmd::profile::run(&ctx, c).await,
-        Command::Registry(c) => cmd::registry::run(&ctx, c).await,
-        Command::Target(c) => cmd::target::run(&ctx, c).await,
-        Command::Workload(c) => cmd::workload::run(&ctx, c).await,
-        Command::Group(c) => cmd::group::run(&ctx, c).await,
-        Command::Service(c) => cmd::service::run(&ctx, c).await,
-        Command::Hook(c) => cmd::hook::run(&ctx, c).await,
-        Command::Storage(c) => cmd::storage::run(&ctx, c).await,
-        Command::Backup(c) => cmd::backup::run(&ctx, c).await,
-        Command::Mcp(c) => cmd::mcp::run(&ctx, c).await,
-        Command::Net(c) => cmd::net::run(&ctx, c).await,
-        Command::Route(c) => cmd::route::run(&ctx, c).await,
-        Command::Render => cmd::deploy::render(&ctx).await,
-        Command::Plan => cmd::deploy::plan(&ctx).await,
+    let access = cli.command.access();
+    let org = match access {
+        Access::None => None,
+        _ => ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref()).ok(),
+    };
+    if access == Access::Server
+        && let Some(org) = &org
+        && ikit_app::remote_spec(&ctx.paths, org)?.is_some()
+    {
+        anyhow::bail!(
+            "org `{org}` keeps its state remotely, which `ikit mcp serve` does not support yet"
+        );
+    }
+    let session = match (&org, access) {
+        (Some(org), Access::Read | Access::Write) => {
+            let opts = ikit_app::SessionOptions {
+                command: command_line(),
+                lock_timeout: Duration::from_secs(cli.lock_timeout),
+            };
+            ikit_app::Session::begin(&ctx.paths, org, access == Access::Write, &opts).await?
+        }
+        _ => None,
+    };
+    let Some(session) = session else {
+        return dispatch(&ctx, cli.command).await;
+    };
+
+    // Ctrl-C still pushes what the command changed so far and releases the lock.
+    let result = tokio::select! {
+        r = dispatch(&ctx, cli.command) => r,
+        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
+    };
+    match session.finish().await {
+        Ok(SyncOutcome::Pushed { generation }) => {
+            eprintln!("remote: pushed generation {generation}")
+        }
+        Ok(SyncOutcome::Unpushed) => warn(
+            "this command changed local state but does not take the remote lock; \
+             it will be pushed by the next change (see `ikit org status`)",
+        ),
+        Ok(SyncOutcome::Unchanged) => {}
+        Err(e) if result.is_ok() => return Err(e.into()),
+        Err(e) => warn(format!("remote: {e}")),
+    }
+    result
+}
+
+/// The command line as typed, recorded in the remote lock and HEAD.
+pub fn command_line() -> String {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    format!("ikit {}", args.join(" "))
+}
+
+async fn dispatch(ctx: &Ctx, command: Command) -> anyhow::Result<()> {
+    match command {
+        Command::Init => cmd::init::run(ctx).await,
+        Command::Org(c) => cmd::org::run(ctx, c).await,
+        Command::Profile(c) => cmd::profile::run(ctx, c).await,
+        Command::Registry(c) => cmd::registry::run(ctx, c).await,
+        Command::Target(c) => cmd::target::run(ctx, c).await,
+        Command::Workload(c) => cmd::workload::run(ctx, c).await,
+        Command::Group(c) => cmd::group::run(ctx, c).await,
+        Command::Service(c) => cmd::service::run(ctx, c).await,
+        Command::Hook(c) => cmd::hook::run(ctx, c).await,
+        Command::Storage(c) => cmd::storage::run(ctx, c).await,
+        Command::Backup(c) => cmd::backup::run(ctx, c).await,
+        Command::Mcp(c) => cmd::mcp::run(ctx, c).await,
+        Command::Net(c) => cmd::net::run(ctx, c).await,
+        Command::Route(c) => cmd::route::run(ctx, c).await,
+        Command::Render => cmd::deploy::render(ctx).await,
+        Command::Plan => cmd::deploy::plan(ctx).await,
         Command::Apply {
             yes,
             allow_changed,
             force,
-        } => cmd::deploy::apply(&ctx, yes, allow_changed, force).await,
-        Command::Status { drift: false, .. } => cmd::deploy::status(&ctx).await,
-        Command::Status { drift: true, all } => cmd::deploy::drift(&ctx, all).await,
-        Command::Destroy { volumes, yes } => cmd::deploy::destroy(&ctx, volumes, yes).await,
+        } => cmd::deploy::apply(ctx, yes, allow_changed, force).await,
+        Command::Status { drift: false, .. } => cmd::deploy::status(ctx).await,
+        Command::Status { drift: true, all } => cmd::deploy::drift(ctx, all).await,
+        Command::Destroy { volumes, yes } => cmd::deploy::destroy(ctx, volumes, yes).await,
     }
 }
 

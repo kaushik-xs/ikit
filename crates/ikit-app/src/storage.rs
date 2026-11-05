@@ -142,72 +142,13 @@ impl App {
             }
             None => Default::default(),
         };
-        let get = |k: &str| values.get(k).cloned();
-        let err = store_error(&storage.name);
-        let o = &storage.options;
-        let store: Arc<dyn ObjectStore> = match storage.provider {
-            StorageProvider::S3 => {
-                let mut b = object_store::aws::AmazonS3Builder::from_env()
-                    .with_bucket_name(&storage.bucket);
-                // Static keys on the ikit profile win over a named profile in ~/.aws.
-                let shared = match (get("access_key_id"), get("aws_profile")) {
-                    (None, Some(name)) => Some(crate::aws_shared::load(&name)?),
-                    _ => None,
-                };
-                let shared_region = shared.as_ref().and_then(|s| s.region.clone());
-                if let Some(region) = o.region.clone().or_else(|| get("region")).or(shared_region) {
-                    b = b.with_region(region);
-                }
-                if let (Some(id), Some(secret)) = (get("access_key_id"), get("secret_access_key")) {
-                    b = b.with_access_key_id(id).with_secret_access_key(secret);
-                } else if let Some(s) = shared {
-                    b = b
-                        .with_access_key_id(s.access_key_id)
-                        .with_secret_access_key(s.secret_access_key);
-                    if let Some(token) = s.session_token {
-                        b = b.with_token(token);
-                    }
-                }
-                if let Some(endpoint) = &o.endpoint {
-                    // S3-compatible stores (MinIO) use path-style URLs and often plain HTTP.
-                    b = b
-                        .with_endpoint(endpoint)
-                        .with_virtual_hosted_style_request(false)
-                        .with_allow_http(endpoint.starts_with("http://"));
-                }
-                Arc::new(b.build().map_err(err)?)
-            }
-            StorageProvider::Azure => {
-                let mut b = object_store::azure::MicrosoftAzureBuilder::from_env()
-                    .with_container_name(&storage.bucket);
-                if let Some(account) = &o.account {
-                    b = b.with_account(account);
-                }
-                if let (Some(tenant), Some(client), Some(secret)) =
-                    (get("tenant_id"), get("client_id"), get("client_secret"))
-                {
-                    b = b
-                        .with_tenant_id(tenant)
-                        .with_client_id(client)
-                        .with_client_secret(secret);
-                }
-                Arc::new(b.build().map_err(err)?)
-            }
-            StorageProvider::Gcs => {
-                let mut b = object_store::gcp::GoogleCloudStorageBuilder::from_env()
-                    .with_bucket_name(&storage.bucket);
-                if let Some(path) = get("credentials_file") {
-                    b = b.with_service_account_path(path);
-                }
-                Arc::new(b.build().map_err(err)?)
-            }
-            StorageProvider::Local => {
-                let root = o.root.clone().expect("validated on add");
-                std::fs::create_dir_all(&root)?;
-                Arc::new(object_store::local::LocalFileSystem::new_with_prefix(&root).map_err(err)?)
-            }
-        };
-        Ok(store)
+        build_object_store(
+            &storage.name,
+            storage.provider,
+            &storage.bucket,
+            &storage.options,
+            &|k| values.get(k).cloned(),
+        )
     }
 
     pub(crate) async fn put_object(
@@ -282,6 +223,80 @@ impl App {
         out.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(out)
     }
+}
+
+/// An object store for `bucket` with `provider`'s settings; `get` reads credential fields
+/// (`access_key_id`, `aws_profile`, `credentials_file`, …), falling back to the environment.
+pub(crate) fn build_object_store(
+    name: &str,
+    provider: StorageProvider,
+    bucket: &str,
+    o: &StorageOptions,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<Arc<dyn ObjectStore>> {
+    let err = store_error(name);
+    let store: Arc<dyn ObjectStore> = match provider {
+        StorageProvider::S3 => {
+            let mut b = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
+            // Static keys on the ikit profile win over a named profile in ~/.aws.
+            let shared = match (get("access_key_id"), get("aws_profile")) {
+                (None, Some(name)) => Some(crate::aws_shared::load(&name)?),
+                _ => None,
+            };
+            let shared_region = shared.as_ref().and_then(|s| s.region.clone());
+            if let Some(region) = o.region.clone().or_else(|| get("region")).or(shared_region) {
+                b = b.with_region(region);
+            }
+            if let (Some(id), Some(secret)) = (get("access_key_id"), get("secret_access_key")) {
+                b = b.with_access_key_id(id).with_secret_access_key(secret);
+            } else if let Some(s) = shared {
+                b = b
+                    .with_access_key_id(s.access_key_id)
+                    .with_secret_access_key(s.secret_access_key);
+                if let Some(token) = s.session_token {
+                    b = b.with_token(token);
+                }
+            }
+            if let Some(endpoint) = &o.endpoint {
+                // S3-compatible stores (MinIO) use path-style URLs and often plain HTTP.
+                b = b
+                    .with_endpoint(endpoint)
+                    .with_virtual_hosted_style_request(false)
+                    .with_allow_http(endpoint.starts_with("http://"));
+            }
+            Arc::new(b.build().map_err(err)?)
+        }
+        StorageProvider::Azure => {
+            let mut b =
+                object_store::azure::MicrosoftAzureBuilder::from_env().with_container_name(bucket);
+            if let Some(account) = &o.account {
+                b = b.with_account(account);
+            }
+            if let (Some(tenant), Some(client), Some(secret)) =
+                (get("tenant_id"), get("client_id"), get("client_secret"))
+            {
+                b = b
+                    .with_tenant_id(tenant)
+                    .with_client_id(client)
+                    .with_client_secret(secret);
+            }
+            Arc::new(b.build().map_err(err)?)
+        }
+        StorageProvider::Gcs => {
+            let mut b =
+                object_store::gcp::GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+            if let Some(path) = get("credentials_file") {
+                b = b.with_service_account_path(path);
+            }
+            Arc::new(b.build().map_err(err)?)
+        }
+        StorageProvider::Local => {
+            let root = o.root.clone().expect("validated on add");
+            std::fs::create_dir_all(&root)?;
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(&root).map_err(err)?)
+        }
+    };
+    Ok(store)
 }
 
 /// The profile kind that holds credentials for a provider.

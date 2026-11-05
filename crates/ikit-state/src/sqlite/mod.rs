@@ -154,6 +154,33 @@ async fn applied_versions(pool: &SqlitePool) -> Result<HashSet<i64>> {
     Ok(versions.into_iter().collect())
 }
 
+/// The newest schema version this build knows; a database migrated past it was written
+/// by a newer ikit.
+pub fn schema_version() -> i64 {
+    MIGRATOR.iter().map(|m| m.version).max().unwrap_or(0)
+}
+
+/// Writes a consistent, compacted copy of the database at `db` to `out` (replacing it).
+/// Equal contents give byte-identical copies, so copies can be compared to detect changes.
+pub async fn snapshot_to(db: &Path, out: &Path) -> Result<()> {
+    if out.exists() {
+        std::fs::remove_file(out)?;
+    }
+    let opts = SqliteConnectOptions::from_str("sqlite:")?
+        .filename(db)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await?;
+    sqlx::query("VACUUM INTO ?")
+        .bind(out.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    Ok(())
+}
+
 /// Takes a consistent snapshot with `VACUUM INTO`, which is safe while other connections are open.
 async fn backup(pool: &SqlitePool, path: &Path, version: i64) -> Result<PathBuf> {
     let mut target = PathBuf::from(format!("{}.bak-{version:04}", path.display()));

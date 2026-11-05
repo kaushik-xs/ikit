@@ -27,6 +27,7 @@ mod registry;
 mod registry_auth;
 mod registry_edit;
 mod registry_ops;
+mod remote;
 mod routes;
 pub mod secrets;
 mod services;
@@ -57,6 +58,10 @@ pub use profiles::AddProfile;
 pub use registry::{AddVersion, Outdated, RegistryFilter};
 pub use registry_edit::{ServiceChanges, VersionChanges, VersionUpdate};
 pub use registry_ops::{ImageRef, SyncReport};
+pub use remote::{
+    PullReport, Remote, RemoteOverrides, RemoteStatus, Session, SessionOptions, SyncOutcome,
+    org_clone, org_lock_info, org_pull, org_status, org_unlock, remote_rm, remote_spec,
+};
 pub use routes::{RouteList, RouteRequest};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore};
 pub use services::{AddServicesReport, ServiceRequest, UnmetDependency};

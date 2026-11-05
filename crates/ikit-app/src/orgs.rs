@@ -41,7 +41,7 @@ fn not_found(name: &str) -> AppError {
 }
 
 /// Names of orgs under the home, sorted.
-fn org_names(paths: &Paths) -> Result<Vec<String>> {
+pub(crate) fn org_names(paths: &Paths) -> Result<Vec<String>> {
     let dir = paths.orgs_dir();
     if !dir.exists() {
         return Ok(vec![]);

@@ -46,6 +46,7 @@ pub mod hook;
 pub mod network;
 pub mod profile;
 pub mod registry;
+pub mod remote;
 pub mod storage;
 pub mod target;
 pub mod version;
@@ -64,6 +65,7 @@ pub use profile::{FieldSpec, Profile, ProfileError, ProfileKind, ProfileValues, 
 pub use registry::{
     Category, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,
 };
+pub use remote::{Head, LockInfo, RemoteSpec};
 pub use storage::{Backup, Storage, StorageOptions, StorageProvider};
 pub use target::{Connection, Target, TargetKind, TargetStatus, ZtRoute};
 pub use version::{Dependency, VersionConstraint, VersionError};

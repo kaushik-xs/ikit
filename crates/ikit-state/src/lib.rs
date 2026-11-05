@@ -20,7 +20,7 @@ use semver::Version;
 
 mod sqlite;
 
-pub use sqlite::{OpenReport, SqliteStore};
+pub use sqlite::{OpenReport, SqliteStore, schema_version, snapshot_to};
 
 pub type Result<T, E = StateError> = std::result::Result<T, E>;
 
