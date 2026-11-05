@@ -62,8 +62,8 @@ fn only_recipients_read_and_write() {
     assert!(none.get("k").unwrap_err().to_string().contains("ikit identity create"));
 
     let as_alice = AgeFileStore::new(org(&dir), Some(alice.clone()));
-    assert!(as_alice.grant(b.clone()).unwrap());
-    assert!(!as_alice.grant(b).unwrap(), "already a recipient");
+    assert!(as_alice.grant("org", b.clone()).unwrap());
+    assert!(!as_alice.grant("org", b).unwrap(), "already a recipient");
     let as_bob = AgeFileStore::new(org(&dir), Some(bob));
     assert_eq!(as_bob.get("k").unwrap().as_deref(), Some("v"));
     as_bob.set("k", "from bob").unwrap();
@@ -79,7 +79,7 @@ fn revoked_keys_cannot_read_the_new_file() {
     let as_alice = AgeFileStore::new(org(&dir), Some(alice.clone()));
     as_alice.init(&[a, b], secrets(&[("k", "v")])).unwrap();
 
-    let removed = as_alice.revoke("bob").unwrap();
+    let removed = as_alice.revoke("org", "bob").unwrap();
     assert_eq!(removed.key, bob.public);
     let e = AgeFileStore::new(org(&dir), Some(bob))
         .get("k")
@@ -87,10 +87,10 @@ fn revoked_keys_cannot_read_the_new_file() {
         .to_string();
     assert!(e.contains("cannot read"), "{e}");
     assert!(
-        as_alice.revoke(&alice.public).is_err(),
+        as_alice.revoke("org", &alice.public).is_err(),
         "the last recipient stays"
     );
-    assert!(as_alice.revoke("nobody").is_err());
+    assert!(as_alice.revoke("org", "nobody").is_err());
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn a_non_recipient_cannot_add_keys_or_secrets() {
         .init(&[a], secrets(&[]))
         .unwrap();
     let as_mallory = AgeFileStore::new(org(&dir), Some(mallory));
-    assert!(as_mallory.grant(m).is_err());
+    assert!(as_mallory.grant("org", m).is_err());
     assert!(as_mallory.set("k", "v").is_err());
 }
 
@@ -191,4 +191,97 @@ async fn init_moves_keychain_secrets_and_the_org_switches_stores() {
         .unwrap();
     assert_eq!(forgotten, [key]);
     assert!(keychain.get(key).unwrap().is_none());
+}
+
+const PROD: &str = "org/acme/workload/wl-acme-prod-001/db";
+const DEV: &str = "org/acme/workload/wl-acme-dev-001/db";
+const HOOK: &str = "org/acme/hook/wl-acme-prod-001/notify";
+const PROFILE: &str = "org/acme/profile/zerotier/zt";
+
+#[test]
+fn split_gives_an_env_its_own_readers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, a) = person("alice");
+    let (bob, b) = person("bob");
+    let as_alice = AgeFileStore::new(org(&dir), Some(alice.clone()));
+    as_alice
+        .init(
+            &[a.clone(), b],
+            secrets(&[(PROD, "p"), (DEV, "d"), (HOOK, "h"), (PROFILE, "z")]),
+        )
+        .unwrap();
+
+    let moved = as_alice.split("prod", std::slice::from_ref(&a)).unwrap();
+    assert_eq!(moved, [HOOK, PROD]);
+    assert!(as_alice.split("prod", std::slice::from_ref(&a)).is_err(), "once");
+    assert!(as_alice.split("org", std::slice::from_ref(&a)).is_err());
+
+    // Bob reads dev and org secrets but not prod's.
+    let as_bob = AgeFileStore::new(org(&dir), Some(bob.clone()));
+    assert_eq!(as_bob.get(DEV).unwrap().as_deref(), Some("d"));
+    assert_eq!(as_bob.get(PROFILE).unwrap().as_deref(), Some("z"));
+    let e = as_bob.get(PROD).unwrap_err().to_string();
+    assert!(e.contains("prod.age") && e.contains("--env prod"), "{e}");
+    assert!(as_bob.set("org/acme/workload/wl-acme-prod-002/x", "v").is_err());
+
+    // New prod secrets land in the prod file.
+    let fresh = AgeFileStore::new(org(&dir), Some(alice.clone()));
+    fresh.set("org/acme/workload/wl-acme-prod-002/x", "v").unwrap();
+    let scopes = fresh.scopes().unwrap();
+    assert_eq!(scopes[0].scope, "org");
+    assert_eq!(scopes[0].secrets, Some(2));
+    assert_eq!(scopes[1].scope, "prod");
+    assert_eq!(scopes[1].secrets, Some(3));
+
+    let merged = fresh.merge("prod").unwrap();
+    assert_eq!(merged.len(), 3);
+    assert!(!recipients_path(&org(&dir), "prod").exists());
+    let as_bob = AgeFileStore::new(org(&dir), Some(bob));
+    assert_eq!(as_bob.get(PROD).unwrap().as_deref(), Some("p"));
+    assert!(fresh.merge("prod").is_err());
+}
+
+#[test]
+fn only_org_readers_may_split_and_the_splitter_must_keep_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, a) = person("alice");
+    let (bob, b) = person("bob");
+    AgeFileStore::new(org(&dir), Some(alice.clone()))
+        .init(std::slice::from_ref(&a), secrets(&[(PROD, "p")]))
+        .unwrap();
+    let as_bob = AgeFileStore::new(org(&dir), Some(bob));
+    assert!(as_bob.split("prod", std::slice::from_ref(&b)).is_err());
+    let as_alice = AgeFileStore::new(org(&dir), Some(alice));
+    assert!(as_alice.split("prod", &[b]).is_err(), "alice left herself out");
+    assert!(!recipients_path(&org(&dir), "prod").exists(), "nothing written");
+}
+
+#[test]
+fn keys_map_to_their_workload_env() {
+    assert_eq!(key_env(PROD).as_deref(), Some("prod"));
+    assert_eq!(key_env(HOOK).as_deref(), Some("prod"));
+    assert_eq!(key_env(PROFILE), None);
+    assert_eq!(key_env("org/acme/registry/ghcr.io"), None);
+    assert_eq!(key_env("org/acme/workload/not-a-name/x"), None);
+}
+
+#[tokio::test]
+async fn check_wants_a_recovery_key_and_two_people() {
+    let (_dir, app, _) = crate::testing::app().await;
+    let (identity, _) = crate::remote::tests::test_identity();
+    app.secrets_init(&identity, vec![]).await.unwrap();
+    let paths = app.paths().clone();
+    let problems = crate::secrets_check(&paths, "acme", 2).unwrap();
+    assert_eq!(problems.len(), 2, "{problems:?}");
+
+    let (_, recovery) = person("recovery");
+    let (_, ci) = person("ci-prod");
+    for r in [recovery, ci] {
+        crate::secrets_grant(&paths, "acme", &identity, &r.key, r.label, None).unwrap();
+    }
+    let problems = crate::secrets_check(&paths, "acme", 2).unwrap();
+    assert_eq!(problems.len(), 1, "a CI key is not a person: {problems:?}");
+    let (_, bob) = person("bob");
+    crate::secrets_grant(&paths, "acme", &identity, &bob.key, bob.label, None).unwrap();
+    assert!(crate::secrets_check(&paths, "acme", 2).unwrap().is_empty());
 }

@@ -109,9 +109,35 @@ pub struct IkitServer {
     key: Arc<String>,
     /// Pending destroy confirmations: token → (workload, issued at).
     destroy_tokens: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    /// One tool call at a time touches an org with remote state: each refreshes the shared
+    /// local copy before running and pushes after.
+    remote_turn: Arc<tokio::sync::Mutex<()>>,
+    /// Reads the org's encrypted secrets, when it has them.
+    identity: IdentityOptions,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
 }
+
+/// Tools that only read state; every other tool takes the remote lock of an org with remote
+/// state (unknown tools included, which is the safe side).
+const READ_TOOLS: &[&str] = &[
+    "workload_list",
+    "workload_show",
+    "workload_runs",
+    "route_list",
+    "target_list",
+    "registry_list",
+    "registry_show",
+    "registry_outdated",
+    "hook_list",
+    "deploy_plan",
+    "deploy_status",
+    "deploy_drift",
+    "zt_status",
+];
+
+/// How long a tool call waits for another writer to release an org's remote lock.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a destroy confirmation token stays valid.
 const TOKEN_TTL: Duration = Duration::from_secs(300);
@@ -273,12 +299,20 @@ impl IkitServer {
                 &format!("{:p}", &TOKEN_TTL),
             ])),
             destroy_tokens: Arc::default(),
+            remote_turn: Arc::default(),
+            identity: IdentityOptions::default(),
             tool_router: Self::tool_router()
                 + Self::mutate_router()
                 + Self::deploy_router()
                 + Self::zt_router(),
             prompt_router: Self::prompt_router(),
         }
+    }
+
+    /// Where the private key for the org's encrypted secrets comes from.
+    pub fn with_identity(mut self, identity: IdentityOptions) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// Limits every client of this server to `scope`.
@@ -300,9 +334,8 @@ impl IkitServer {
     }
 
     async fn app(&self) -> Result<App, String> {
-        let secrets =
-            ikit_app::org_secret_store(&self.paths, &self.org, &IdentityOptions::default())
-                .map_err(|e| e.to_string())?;
+        let secrets = ikit_app::org_secret_store(&self.paths, &self.org, &self.identity)
+            .map_err(|e| e.to_string())?;
         App::open(&self.paths, &self.org, secrets)
             .await
             .map_err(|e| e.to_string())
@@ -986,6 +1019,57 @@ impl IkitServer {
 #[tool_handler(router = self.tool_router)]
 #[prompt_handler(router = self.prompt_router)]
 impl ServerHandler for IkitServer {
+    /// Runs a tool; for an org with remote state, inside a session that brings the local
+    /// copy up to date first and pushes what the tool changed.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let remote = ikit_app::remote_spec(&self.paths, &self.org)
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .is_some();
+        if !remote {
+            let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            return self.tool_router.call(tcc).await;
+        }
+        let _turn = self.remote_turn.lock().await;
+        let name = request.name.to_string();
+        let opts = ikit_app::SessionOptions {
+            command: format!("ikit mcp {name}"),
+            lock_timeout: LOCK_TIMEOUT,
+        };
+        let write = !READ_TOOLS.contains(&name.as_str());
+        let session = ikit_app::Session::begin(&self.paths, &self.org, write, &opts)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+        if let Some(session) = session {
+            for notice in session.notices() {
+                tracing::warn!("{notice}");
+            }
+            match session.finish().await {
+                Ok(ikit_app::SyncOutcome::Pushed { generation }) => {
+                    tracing::info!(tool = %name, generation, "pushed remote state")
+                }
+                Ok(ikit_app::SyncOutcome::Unpushed) => tracing::warn!(
+                    tool = %name,
+                    "a read-only tool changed local state; the next change pushes it"
+                ),
+                Ok(ikit_app::SyncOutcome::Unchanged) => {}
+                Err(e) if result.is_ok() => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        format!("the tool ran, but pushing its change failed: {e}"),
+                        None,
+                    ));
+                }
+                Err(e) => tracing::warn!("remote: {e}"),
+            }
+        }
+        result
+    }
+
     fn get_info(&self) -> ServerConfig {
         let mut info = Implementation::new("ikit", env!("CARGO_PKG_VERSION"));
         info.title = Some(format!("ikit (org {})", self.org));
@@ -1018,9 +1102,11 @@ pub async fn serve_stdio(
     paths: Paths,
     org: String,
     scope: Scope,
+    identity: IdentityOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service = IkitServer::new(paths, org)
         .with_scope(scope)
+        .with_identity(identity)
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;
@@ -1034,6 +1120,7 @@ pub async fn serve_http(
     paths: Paths,
     org: String,
     scope: Scope,
+    identity: IdentityOptions,
     addr: std::net::SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -1042,7 +1129,9 @@ pub async fn serve_http(
     let org_paths = paths.org(&org);
     // One server shared by every session, so plan IDs and destroy tokens issued in one
     // request are honored in the next (stateless clients get a new session per request).
-    let mut server = IkitServer::new(paths, org).with_scope(scope);
+    let mut server = IkitServer::new(paths, org)
+        .with_scope(scope)
+        .with_identity(identity);
     server.token_scoped = true;
     let ip = addr.ip();
     let mut hosts = vec![ip.to_string(), format!("[{ip}]"), addr.to_string()];
@@ -1160,6 +1249,112 @@ mod tests {
             prompts,
             ["diagnose_workload", "plan_upgrades", "review_plan"]
         );
+    }
+
+    #[tokio::test]
+    async fn tool_calls_on_a_remote_org_pull_first_and_push_their_changes() {
+        use rmcp::model::CallToolRequestParams;
+
+        // Alice's org, shared through a folder, with MCP allowed to create dev workloads.
+        let (a, b, shared) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let alice = Paths::new(a.path());
+        ikit_app::org_create(
+            &alice,
+            ikit_app::NewOrg {
+                name: "acme".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        std::fs::write(
+            alice.org("acme").mcp_config_file(),
+            "mutate: true\nmutate_envs: [dev]\n",
+        )
+        .unwrap();
+        let app = App::open(
+            &alice,
+            "acme",
+            Arc::new(ikit_app::MemorySecretStore::default()),
+        )
+        .await
+        .unwrap();
+        app.target_attach("laptop", ikit_core::Connection::Local)
+            .await
+            .unwrap();
+        app.storage_add(ikit_app::NewStorageRequest {
+            name: "nas".into(),
+            provider: ikit_core::StorageProvider::Local,
+            bucket: "local".into(),
+            prefix: String::new(),
+            profile: None,
+            options: ikit_core::StorageOptions {
+                root: Some(shared.path().to_path_buf()),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+        let identity = IdentityOptions {
+            secret: Some(ikit_app::identity_generate().0),
+            ..Default::default()
+        };
+        app.remote_set("nas", Default::default(), &identity, "test")
+            .await
+            .unwrap();
+        drop(app);
+
+        // Bob clones it and serves MCP from his copy.
+        let bob = Paths::new(b.path());
+        let url = format!("local:{}/state/acme", shared.path().display());
+        ikit_app::org_clone(&bob, ikit_core::RemoteSpec::parse_url(&url).unwrap())
+            .await
+            .unwrap();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = IkitServer::new(bob.clone(), "acme".into()).with_identity(identity);
+        tokio::spawn(async move {
+            let running = server.serve(server_io).await.unwrap();
+            let _ = running.waiting().await;
+        });
+        let client = ().serve(client_io).await.unwrap();
+
+        let args = serde_json::json!({"env": "dev", "target": "laptop"});
+        let created = client
+            .call_tool(
+                CallToolRequestParams::new("workload_create")
+                    .with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(created.is_error, Some(true), "{created:?}");
+        let status = ikit_app::org_status(&bob, "acme").await.unwrap();
+        assert_eq!(status.head.unwrap().generation, 2, "the change was pushed");
+        assert!(!status.local_changes);
+
+        // Alice sees it after a pull; a read tool on Bob's server takes no lock.
+        ikit_app::org_pull(&alice, "acme", false).await.unwrap();
+        let app = App::open(
+            &alice,
+            "acme",
+            Arc::new(ikit_app::MemorySecretStore::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.workload_list(None).await.unwrap().len(), 1);
+        let listed = client
+            .call_tool(
+                CallToolRequestParams::new("workload_list").with_arguments(serde_json::Map::new()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(listed.is_error, Some(true), "{listed:?}");
+        let status = ikit_app::org_status(&bob, "acme").await.unwrap();
+        assert_eq!(status.head.unwrap().generation, 2, "reads push nothing");
+        client.cancel().await.unwrap();
     }
 
     #[tokio::test]

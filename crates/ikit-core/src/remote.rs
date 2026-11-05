@@ -134,9 +134,23 @@ pub struct Head {
 impl Head {
     pub const FORMAT: u32 = 1;
 
-    /// `snapshots/000042.tar.zst`
-    pub fn snapshot_key(generation: u64) -> String {
-        format!("snapshots/{generation:06}.tar.zst")
+    /// `snapshots/000042-<id>.tar.zst`. The random `id` keeps a snapshot left by a writer
+    /// that crashed before updating HEAD from blocking that generation number.
+    pub fn snapshot_key(generation: u64, id: &str) -> String {
+        format!("snapshots/{generation:06}-{id}.tar.zst")
+    }
+
+    /// The generation a snapshot key or file name belongs to (`000042.tar.zst` from before
+    /// snapshots had ids, or `000042-<id>.tar.zst`).
+    pub fn snapshot_generation(key: &str) -> Option<u64> {
+        let name = key.rsplit('/').next()?.strip_suffix(".tar.zst")?;
+        let digits = name.split_once('-').map_or(name, |(g, _)| g);
+        (digits.len() == 6).then(|| digits.parse().ok()).flatten()
+    }
+
+    /// `history/000042.json`: a copy of HEAD as it was when that generation was written.
+    pub fn history_key(generation: u64) -> String {
+        format!("history/{generation:06}.json")
     }
 }
 
@@ -184,7 +198,12 @@ mod tests {
 
     #[test]
     fn snapshot_keys_sort_by_generation() {
-        assert_eq!(Head::snapshot_key(42), "snapshots/000042.tar.zst");
-        assert!(Head::snapshot_key(9) < Head::snapshot_key(10));
+        assert_eq!(Head::snapshot_key(42, "ab"), "snapshots/000042-ab.tar.zst");
+        assert!(Head::snapshot_key(9, "ff") < Head::snapshot_key(10, "00"));
+        assert_eq!(Head::snapshot_generation("x/snapshots/000042-ab.tar.zst"), Some(42));
+        assert_eq!(Head::snapshot_generation("snapshots/000007.tar.zst"), Some(7));
+        assert_eq!(Head::snapshot_generation("snapshots/notes.txt"), None);
+        assert_eq!(Head::snapshot_generation("snapshots/42.tar.zst"), None);
+        assert_eq!(Head::history_key(3), "history/000003.json");
     }
 }

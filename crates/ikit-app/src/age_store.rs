@@ -8,6 +8,10 @@
 //!
 //! An org uses the file once `recipients/org.txt` exists (`ikit org secrets init`); until then
 //! it uses the OS keychain. Keys are the same as the keychain's, so callers do not change.
+//!
+//! An environment can have its own file for a smaller group (`ikit org secrets split prod`):
+//! `secrets/prod.age` with `recipients/prod.txt` then holds the secrets of `prod` workloads
+//! and their hooks, and `org.age` everything else.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -22,19 +26,43 @@ use zeroize::Zeroizing;
 use crate::paths::OrgPaths;
 use crate::secrets::{SecretError, SecretStore};
 
-/// The secrets file every org has; per-environment files come later.
-pub const SCOPE: &str = "org";
+/// The secrets file every org has; environments may add their own.
+pub const ORG_SCOPE: &str = "org";
 /// Keychain account holding this machine's private key.
 pub const IDENTITY_KEY: &str = "identity/default";
 /// Environment variable holding a private key (`AGE-SECRET-KEY-…`), e.g. in CI.
 pub const IDENTITY_ENV: &str = "IKIT_AGE_IDENTITY";
 
 pub fn recipients_file(org: &OrgPaths) -> PathBuf {
-    org.dir.join("recipients").join(format!("{SCOPE}.txt"))
+    recipients_path(org, ORG_SCOPE)
 }
 
 pub fn secrets_file(org: &OrgPaths) -> PathBuf {
-    org.dir.join("secrets").join(format!("{SCOPE}.age"))
+    secrets_path(org, ORG_SCOPE)
+}
+
+/// `recipients/<scope>.txt`
+pub fn recipients_path(org: &OrgPaths, scope: &str) -> PathBuf {
+    org.dir.join("recipients").join(format!("{scope}.txt"))
+}
+
+/// `secrets/<scope>.age`
+pub fn secrets_path(org: &OrgPaths, scope: &str) -> PathBuf {
+    org.dir.join("secrets").join(format!("{scope}.age"))
+}
+
+/// The environment whose workload a secret key belongs to: `org/<org>/workload/<wl>/…` and
+/// `org/<org>/hook/<wl>/…`.
+fn key_env(key: &str) -> Option<String> {
+    let mut parts = key.split('/');
+    let (Some("org"), Some(_), Some("workload" | "hook"), Some(wl)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    wl.parse::<ikit_core::workload::WorkloadName>()
+        .ok()
+        .map(|n| n.env)
 }
 
 /// Whether the org keeps its secrets in the encrypted file rather than the keychain.
@@ -125,6 +153,65 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SecretError> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(io)?;
     std::fs::rename(&tmp, path).map_err(io)
+}
+
+/// Every secrets file's recipients, by scope (`org`, `prod`, …), as the org folder lists them.
+pub(crate) fn all_recipients(org: &OrgPaths) -> BTreeMap<String, Vec<RecipientEntry>> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(org.dir.join("recipients")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(scope) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".txt"))
+        else {
+            continue;
+        };
+        if let Ok(list) = read_recipients(&path) {
+            out.insert(scope.to_owned(), list);
+        }
+    }
+    out
+}
+
+/// Lines describing who gained or lost access between two [`all_recipients`] readings.
+pub(crate) fn recipient_changes(
+    before: &BTreeMap<String, Vec<RecipientEntry>>,
+    after: &BTreeMap<String, Vec<RecipientEntry>>,
+) -> Vec<String> {
+    let name = |r: &RecipientEntry| match &r.label {
+        Some(l) => format!("{l} ({})", short_key(&r.key)),
+        None => short_key(&r.key),
+    };
+    let mut lines = Vec::new();
+    let scopes: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for scope in scopes {
+        let (old, new) = (
+            before.get(scope).map(Vec::as_slice).unwrap_or_default(),
+            after.get(scope).map(Vec::as_slice).unwrap_or_default(),
+        );
+        for r in new.iter().filter(|r| !old.iter().any(|o| o.key == r.key)) {
+            lines.push(format!("{} can now read {scope} secrets", name(r)));
+        }
+        for r in old.iter().filter(|r| !new.iter().any(|n| n.key == r.key)) {
+            lines.push(format!("{} can no longer read {scope} secrets", name(r)));
+        }
+    }
+    lines
+}
+
+/// `age1abcd…wxyz` / `ssh-ed25519 AAAA…wxyz`, enough to tell keys apart.
+fn short_key(key: &str) -> String {
+    let (kind, body) = key.split_once(' ').map_or(("", key), |(k, b)| (k, b));
+    let short = if body.len() > 14 {
+        format!("{}…{}", &body[..8], &body[body.len() - 4..])
+    } else {
+        body.to_owned()
+    };
+    if kind.is_empty() { short } else { format!("{kind} {short}") }
 }
 
 /// This machine's private key and the public key it pairs with.
@@ -243,11 +330,22 @@ struct Plaintext {
 
 type Secrets = BTreeMap<String, Zeroizing<String>>;
 
-/// Secrets in `secrets/org.age`, decrypted on first use and kept in memory only.
+/// One secrets file and who can read it, as summarized by [`AgeFileStore::scopes`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopeInfo {
+    /// `org`, or an environment.
+    pub scope: String,
+    pub file: PathBuf,
+    pub recipients: Vec<RecipientEntry>,
+    /// Number of secrets, when this machine can read them.
+    pub secrets: Option<usize>,
+}
+
+/// Secrets in `secrets/<scope>.age`, each file decrypted on first use and kept in memory only.
 pub struct AgeFileStore {
     org: OrgPaths,
     identity: Option<Arc<LocalIdentity>>,
-    cache: Mutex<Option<Secrets>>,
+    cache: Mutex<BTreeMap<String, Secrets>>,
 }
 
 impl AgeFileStore {
@@ -255,7 +353,7 @@ impl AgeFileStore {
         Self {
             org,
             identity,
-            cache: Mutex::new(None),
+            cache: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -270,20 +368,65 @@ impl AgeFileStore {
         })
     }
 
-    pub fn recipients(&self) -> Result<Vec<RecipientEntry>, SecretError> {
-        read_recipients(&recipients_file(&self.org))
+    fn has_scope(&self, scope: &str) -> bool {
+        recipients_path(&self.org, scope).exists()
     }
 
-    fn with_secrets<T>(&self, f: impl FnOnce(&mut Secrets) -> T) -> Result<T, SecretError> {
-        let mut cache = self.cache.lock().expect("secrets cache");
-        if cache.is_none() {
-            *cache = Some(self.decrypt()?);
+    fn require_scope(&self, scope: &str) -> Result<(), SecretError> {
+        if self.has_scope(scope) {
+            Ok(())
+        } else {
+            Err(err(format!(
+                "org `{}` has no `{scope}` secrets file",
+                self.org.name
+            )))
         }
-        Ok(f(cache.as_mut().expect("loaded")))
     }
 
-    fn decrypt(&self) -> Result<Secrets, SecretError> {
-        let path = secrets_file(&self.org);
+    /// The file a key belongs in: its workload's environment file when there is one.
+    fn scope_for(&self, key: &str) -> String {
+        match key_env(key) {
+            Some(env) if self.has_scope(&env) => env,
+            _ => ORG_SCOPE.to_owned(),
+        }
+    }
+
+    pub fn recipients(&self, scope: &str) -> Result<Vec<RecipientEntry>, SecretError> {
+        read_recipients(&recipients_path(&self.org, scope))
+    }
+
+    /// Every secrets file, `org` first.
+    pub fn scopes(&self) -> Result<Vec<ScopeInfo>, SecretError> {
+        let mut names: Vec<String> = all_recipients(&self.org).into_keys().collect();
+        names.sort_by_key(|n| (n != ORG_SCOPE, n.clone()));
+        names
+            .into_iter()
+            .map(|scope| {
+                Ok(ScopeInfo {
+                    file: secrets_path(&self.org, &scope),
+                    recipients: self.recipients(&scope)?,
+                    secrets: self.with_secrets(&scope, |s| s.len()).ok(),
+                    scope,
+                })
+            })
+            .collect()
+    }
+
+    fn with_secrets<T>(
+        &self,
+        scope: &str,
+        f: impl FnOnce(&mut Secrets) -> T,
+    ) -> Result<T, SecretError> {
+        let mut cache = self.cache.lock().expect("secrets cache");
+        if !cache.contains_key(scope) {
+            let loaded = self.decrypt(scope)?;
+            cache.insert(scope.to_owned(), loaded);
+        }
+        Ok(f(cache.get_mut(scope).expect("loaded")))
+    }
+
+    fn decrypt(&self, scope: &str) -> Result<Secrets, SecretError> {
+        let path = secrets_path(&self.org, scope);
         if !path.exists() {
             return Ok(Secrets::new());
         }
@@ -297,10 +440,15 @@ impl AgeFileStore {
             .map_err(|e| match e {
                 age::DecryptError::NoMatchingKeys => err(format!(
                     "your key {} cannot read {}; ask a teammate to run \
-                     `ikit org secrets grant {}`",
+                     `ikit org secrets grant {}{}`",
                     identity.public,
                     path.display(),
-                    identity.public
+                    identity.public,
+                    if scope == ORG_SCOPE {
+                        String::new()
+                    } else {
+                        format!(" --env {scope}")
+                    }
                 )),
                 e => err(format!("{}: {e}", path.display())),
             })?;
@@ -324,11 +472,12 @@ impl AgeFileStore {
             .collect())
     }
 
-    /// Encrypts `secrets` to `recipients`. Refused unless this machine's key is in `writers`
-    /// (the recipients before the change): only someone who can already read the secrets
-    /// may change them or who can read them.
+    /// Encrypts `secrets` to `recipients` as the `scope` file. Refused unless this machine's
+    /// key is in `writers` (the recipients before the change): only someone who can already
+    /// read the secrets may change them or who can read them.
     fn encrypt(
         &self,
+        scope: &str,
         secrets: &Secrets,
         recipients: &[RecipientEntry],
         writers: &[RecipientEntry],
@@ -336,7 +485,8 @@ impl AgeFileStore {
         let me = &self.identity()?.public;
         if !writers.iter().any(|r| &r.key == me) {
             return Err(err(format!(
-                "your key {me} is not a recipient of org `{}`'s secrets, so you cannot change them",
+                "your key {me} is not a recipient of org `{}`'s {scope} secrets, so you cannot \
+                 change them",
                 self.org.name
             )));
         }
@@ -363,11 +513,16 @@ impl AgeFileStore {
             .write_all(&json)
             .and_then(|()| writer.finish().map(|_| ()))
             .map_err(|e| err(format!("encrypting secrets: {e}")))?;
-        write_file(&secrets_file(&self.org), &out)
+        write_file(&secrets_path(&self.org, scope), &out)?;
+        self.cache
+            .lock()
+            .expect("secrets cache")
+            .insert(scope.to_owned(), secrets.clone());
+        Ok(())
     }
 
-    /// Starts the encrypted file with `recipients` (which must include this machine's key)
-    /// and `secrets`.
+    /// Starts the org's encrypted file with `recipients` (which must include this machine's
+    /// key) and `secrets`.
     pub fn init(
         &self,
         recipients: &[RecipientEntry],
@@ -384,79 +539,150 @@ impl AgeFileStore {
             .into_iter()
             .map(|(k, v)| (k, Zeroizing::new(v)))
             .collect();
-        self.encrypt(&secrets, recipients, recipients)?;
-        write_recipients(&recipients_file(&self.org), recipients)?;
-        *self.cache.lock().expect("secrets cache") = Some(secrets);
-        Ok(())
+        self.encrypt(ORG_SCOPE, &secrets, recipients, recipients)?;
+        write_recipients(&recipients_file(&self.org), recipients)
     }
 
-    /// Adds a recipient and re-encrypts. Returns false when the key was already listed.
-    pub fn grant(&self, entry: RecipientEntry) -> Result<bool, SecretError> {
-        let mut recipients = self.recipients()?;
+    /// Adds a recipient to `scope` and re-encrypts. Returns false when it was already listed.
+    pub fn grant(&self, scope: &str, entry: RecipientEntry) -> Result<bool, SecretError> {
+        self.require_scope(scope)?;
+        let mut recipients = self.recipients(scope)?;
         if recipients.iter().any(|r| r.key == entry.key) {
             return Ok(false);
         }
         recipients.push(entry);
-        self.rewrite(&recipients)?;
+        self.rewrite(scope, &recipients)?;
         Ok(true)
     }
 
-    /// Removes the recipient whose key or label is `who` and re-encrypts.
-    pub fn revoke(&self, who: &str) -> Result<RecipientEntry, SecretError> {
-        let mut recipients = self.recipients()?;
+    /// Removes the recipient of `scope` whose key or label is `who` and re-encrypts.
+    pub fn revoke(&self, scope: &str, who: &str) -> Result<RecipientEntry, SecretError> {
+        self.require_scope(scope)?;
+        let mut recipients = self.recipients(scope)?;
         let who = who.trim();
         let i = recipients
             .iter()
             .position(|r| r.key == who || r.label.as_deref() == Some(who))
-            .ok_or_else(|| err(format!("`{who}` is not a recipient")))?;
+            .ok_or_else(|| err(format!("`{who}` is not a recipient of the {scope} secrets")))?;
         if recipients.len() == 1 {
             return Err(err(
                 "that is the last recipient; nobody could read the secrets after revoking it",
             ));
         }
         let removed = recipients.remove(i);
-        self.rewrite(&recipients)?;
+        self.rewrite(scope, &recipients)?;
         Ok(removed)
     }
 
-    /// Re-encrypts to a changed recipient list. The secrets are decrypted first, so this
-    /// works even when the change removes this machine's own key.
-    fn rewrite(&self, recipients: &[RecipientEntry]) -> Result<(), SecretError> {
-        let before = self.recipients()?;
-        let secrets = self.with_secrets(|s| s.clone())?;
-        self.encrypt(&secrets, recipients, &before)?;
-        write_recipients(&recipients_file(&self.org), recipients)
+    /// Re-encrypts `scope` to a changed recipient list. The secrets are decrypted first, so
+    /// this works even when the change removes this machine's own key.
+    fn rewrite(&self, scope: &str, recipients: &[RecipientEntry]) -> Result<(), SecretError> {
+        let before = self.recipients(scope)?;
+        let secrets = self.with_secrets(scope, |s| s.clone())?;
+        self.encrypt(scope, &secrets, recipients, &before)?;
+        write_recipients(&recipients_path(&self.org, scope), recipients)
     }
 
-    /// Names of the stored secrets.
+    /// Gives environment `env` its own secrets file readable by `recipients`, moving its
+    /// workloads' and hooks' secrets out of the org file. Returns the keys moved.
+    pub fn split(&self, env: &str, recipients: &[RecipientEntry]) -> Result<Vec<String>, SecretError> {
+        if env == ORG_SCOPE || !ikit_core::is_slug(env) {
+            return Err(err(format!("`{env}` cannot name a secrets file")));
+        }
+        if self.has_scope(env) {
+            return Err(err(format!(
+                "org `{}` already has a {env} secrets file",
+                self.org.name
+            )));
+        }
+        let me = self.identity()?.public.clone();
+        if !recipients.iter().any(|r| r.key == me) {
+            return Err(err("include your own key in the new file's recipients"));
+        }
+        let org_recipients = self.recipients(ORG_SCOPE)?;
+        let mut org = self.with_secrets(ORG_SCOPE, |s| s.clone())?;
+        let moved_keys: Vec<String> = org
+            .keys()
+            .filter(|k| key_env(k).as_deref() == Some(env))
+            .cloned()
+            .collect();
+        let moved: Secrets = moved_keys
+            .iter()
+            .map(|k| (k.clone(), org.remove(k).expect("listed")))
+            .collect();
+        // Who may split is who may read the org file; the new file must be readable by them.
+        self.encrypt(env, &moved, recipients, &org_recipients)?;
+        write_recipients(&recipients_path(&self.org, env), recipients)?;
+        // From here on `env` keys resolve to the new file, so the org copy can go.
+        self.encrypt(ORG_SCOPE, &org, &org_recipients, &org_recipients)?;
+        Ok(moved_keys)
+    }
+
+    /// Moves environment `env`'s secrets back into the org file and removes its own file.
+    /// Returns the keys moved.
+    pub fn merge(&self, env: &str) -> Result<Vec<String>, SecretError> {
+        if env == ORG_SCOPE {
+            return Err(err("the org file cannot be merged into itself"));
+        }
+        self.require_scope(env)?;
+        let moved = self.with_secrets(env, |s| s.clone())?;
+        let org_recipients = self.recipients(ORG_SCOPE)?;
+        let mut org = self.with_secrets(ORG_SCOPE, |s| s.clone())?;
+        let keys: Vec<String> = moved.keys().cloned().collect();
+        org.extend(moved);
+        self.encrypt(ORG_SCOPE, &org, &org_recipients, &org_recipients)?;
+        for path in [secrets_path(&self.org, env), recipients_path(&self.org, env)] {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| err(format!("removing {}: {e}", path.display())))?;
+            }
+        }
+        self.cache.lock().expect("secrets cache").remove(env);
+        Ok(keys)
+    }
+
+    /// Names of the stored secrets in files this machine can read.
+    #[cfg(test)]
     pub fn keys(&self) -> Result<Vec<String>, SecretError> {
-        self.with_secrets(|s| s.keys().cloned().collect())
+        let mut keys = Vec::new();
+        for scope in all_recipients(&self.org).into_keys() {
+            if let Ok(k) = self.with_secrets(&scope, |s| s.keys().cloned().collect::<Vec<_>>()) {
+                keys.extend(k);
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
+    fn update(&self, key: &str, value: Option<&str>) -> Result<(), SecretError> {
+        let scope = self.scope_for(key);
+        let recipients = self.recipients(&scope)?;
+        let mut updated = self.with_secrets(&scope, |s| s.clone())?;
+        let changed = match value {
+            Some(v) => updated
+                .insert(key.to_owned(), Zeroizing::new(v.to_owned()))
+                .is_none_or(|old| old.as_str() != v),
+            None => updated.remove(key).is_some(),
+        };
+        if changed {
+            self.encrypt(&scope, &updated, &recipients, &recipients)?;
+        }
+        Ok(())
     }
 }
 
 impl SecretStore for AgeFileStore {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
-        self.with_secrets(|s| s.get(key).map(|v| v.as_str().to_owned()))
+        let scope = self.scope_for(key);
+        self.with_secrets(&scope, |s| s.get(key).map(|v| v.as_str().to_owned()))
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
-        let recipients = self.recipients()?;
-        let mut updated = self.with_secrets(|s| s.clone())?;
-        updated.insert(key.to_owned(), Zeroizing::new(value.to_owned()));
-        self.encrypt(&updated, &recipients, &recipients)?;
-        *self.cache.lock().expect("secrets cache") = Some(updated);
-        Ok(())
+        self.update(key, Some(value))
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretError> {
-        let recipients = self.recipients()?;
-        let mut updated = self.with_secrets(|s| s.clone())?;
-        if updated.remove(key).is_none() {
-            return Ok(());
-        }
-        self.encrypt(&updated, &recipients, &recipients)?;
-        *self.cache.lock().expect("secrets cache") = Some(updated);
-        Ok(())
+        self.update(key, None)
     }
 }
 

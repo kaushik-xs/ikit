@@ -220,14 +220,6 @@ async fn main() -> anyhow::Result<()> {
         Access::None => None,
         _ => ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref()).ok(),
     };
-    if access == Access::Server
-        && let Some(org) = &org
-        && ikit_app::remote_spec(&ctx.paths, org)?.is_some()
-    {
-        anyhow::bail!(
-            "org `{org}` keeps its state remotely, which `ikit mcp serve` does not support yet"
-        );
-    }
     let session = match (&org, access) {
         (Some(org), Access::Read | Access::Write) => {
             let opts = ikit_app::SessionOptions {
@@ -241,6 +233,9 @@ async fn main() -> anyhow::Result<()> {
     let Some(session) = session else {
         return dispatch(&ctx, cli.command).await;
     };
+    for notice in session.notices() {
+        warn(notice);
+    }
 
     // Ctrl-C still pushes what the command changed so far and releases the lock.
     let result = tokio::select! {

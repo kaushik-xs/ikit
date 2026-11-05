@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use ikit_core::{RemoteSpec, StorageOptions, StorageProvider};
 
+use chrono::Utc;
+use ikit_core::Head;
+
 use super::*;
 use crate::testing::app;
 use crate::{MemorySecretStore, NewStorageRequest};
@@ -394,4 +397,176 @@ async fn remote_set_refuses_keychain_credentials() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("keychain"), "{err}");
+}
+
+/// Pushes one change from `paths` as a write session named `command`.
+async fn write(remote: &Remote, paths: &Paths, storage: &str, command: &str) -> u64 {
+    let s = Session::begin_with(remote.clone(), paths.org("acme"), true, &opts(command))
+        .await
+        .unwrap();
+    change(paths, storage).await;
+    match s.finish().await.unwrap() {
+        SyncOutcome::Pushed { generation } => generation,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn history_lists_generations_newest_first() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    write(&remote, &paths, "a", "add a").await;
+    write(&remote, &paths, "b", "add b").await;
+    let history = remote.history(10).await.unwrap();
+    let gens: Vec<u64> = history.iter().map(|h| h.generation).collect();
+    assert_eq!(gens, [3, 2, 1]);
+    assert!(history[0].current);
+    assert_eq!(history[0].command.as_deref(), Some("add b"));
+    assert_eq!(history[2].command.as_deref(), Some("remote set"));
+    assert_eq!(remote.history(1).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn restore_brings_back_an_old_generation_as_a_new_one() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    write(&remote, &paths, "a", "add a").await;
+    write(&remote, &paths, "b", "add b").await;
+    assert_eq!(storages(&paths).await, ["a", "b"]);
+
+    let s = Session::begin_with(remote.clone(), paths.org("acme"), true, &opts("restore 2"))
+        .await
+        .unwrap();
+    restore_into(&remote, &paths.org("acme"), 2, false).await.unwrap();
+    assert_eq!(
+        s.finish().await.unwrap(),
+        SyncOutcome::Pushed { generation: 4 }
+    );
+    assert_eq!(storages(&paths).await, ["a"]);
+    assert!(restore_into(&remote, &paths.org("acme"), 99, false).await.is_err());
+}
+
+#[tokio::test]
+async fn restore_keeps_the_current_secrets_unless_asked() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    let org = paths.org("acme");
+    let recipients = org.dir.join("recipients/org.txt");
+    std::fs::create_dir_all(recipients.parent().unwrap()).unwrap();
+    std::fs::write(&recipients, "age1old # old\n").unwrap();
+    let s = Session::begin_with(remote.clone(), org.clone(), true, &opts("old keys"))
+        .await
+        .unwrap();
+    s.finish().await.unwrap();
+    std::fs::write(&recipients, "age1new # new\n").unwrap();
+    let s = Session::begin_with(remote.clone(), org.clone(), true, &opts("new keys"))
+        .await
+        .unwrap();
+    s.finish().await.unwrap();
+
+    restore_into(&remote, &org, 2, false).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&recipients).unwrap(), "age1new # new\n");
+    restore_into(&remote, &org, 2, true).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&recipients).unwrap(), "age1old # old\n");
+}
+
+#[tokio::test]
+async fn a_snapshot_left_by_a_crashed_writer_does_not_block_the_next() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    // A writer uploaded generation 2's snapshot, then died before updating HEAD.
+    remote
+        .put_if(&Head::snapshot_key(2, "dead"), b"partial".to_vec(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(write(&remote, &paths, "a", "after crash").await, 2);
+    let history = remote.history(10).await.unwrap();
+    assert_eq!(history[0].command.as_deref(), Some("after crash"));
+}
+
+#[tokio::test]
+async fn prune_keeps_head_recent_and_newest_generations() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    for i in 0..4 {
+        write(&remote, &paths, &format!("s{i}"), "w").await;
+    }
+    let (head, _) = remote.head().await.unwrap().unwrap();
+    assert_eq!(head.generation, 5);
+    // Everything is recent: nothing goes.
+    let past = Utc::now() - chrono::Duration::days(1);
+    assert_eq!(remote.prune(&head, 2, past).await.unwrap(), 0);
+    // With a cutoff in the future only the newest two generations stay.
+    let future = Utc::now() + chrono::Duration::days(1);
+    assert_eq!(remote.prune(&head, 2, future).await.unwrap(), 3);
+    let gens: Vec<u64> = remote.history(10).await.unwrap().iter().map(|h| h.generation).collect();
+    assert_eq!(gens, [5, 4]);
+}
+
+#[tokio::test]
+async fn pulling_reports_who_gained_or_lost_access_to_secrets() {
+    let remote = test_remote();
+    let (_a, alice) = seeded(&remote).await;
+    let org = alice.org("acme");
+    let (_, a) = crate::age_store::LocalIdentity::generate();
+    let (_, b) = crate::age_store::LocalIdentity::generate();
+    let recipients = org.dir.join("recipients/org.txt");
+    std::fs::create_dir_all(recipients.parent().unwrap()).unwrap();
+    std::fs::write(&recipients, format!("{} # alice\n", a.public)).unwrap();
+    Session::begin_with(remote.clone(), org.clone(), true, &opts("init"))
+        .await
+        .unwrap()
+        .finish()
+        .await
+        .unwrap();
+    let (_b, bob) = second_home(&remote).await;
+
+    std::fs::write(&recipients, format!("{} # bob\n", b.public)).unwrap();
+    Session::begin_with(remote.clone(), org, true, &opts("swap"))
+        .await
+        .unwrap()
+        .finish()
+        .await
+        .unwrap();
+
+    let s = Session::begin_with(remote.clone(), bob.org("acme"), false, &opts("list"))
+        .await
+        .unwrap();
+    let notices = s.notices().join("\n");
+    assert!(notices.contains("bob (") && notices.contains("can now read org"), "{notices}");
+    assert!(notices.contains("alice (") && notices.contains("can no longer read"), "{notices}");
+    s.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn copies_at_the_same_generation_fingerprint_equal() {
+    let remote = test_remote();
+    let (_a, alice) = seeded(&remote).await;
+    let (_b, bob) = second_home(&remote).await;
+    assert_eq!(
+        fingerprint(&alice.org("acme")).await.unwrap(),
+        fingerprint(&bob.org("acme")).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_baseline_from_before_cookie_pinning_is_converted_not_reported_as_changes() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    let org = paths.org("acme");
+    // What an older ikit recorded: the unpinned checksum, no `pinned` field.
+    let old = checksum_bytes(&bundle(&org, false).await.unwrap());
+    std::fs::write(
+        sync_file(&org),
+        format!(r#"{{"generation":1,"baseline":"{old}","synced_at":"2026-11-05T00:00:00Z"}}"#),
+    )
+    .unwrap();
+    let s = Session::begin_with(remote.clone(), org.clone(), false, &opts("list"))
+        .await
+        .unwrap();
+    assert_eq!(s.finish().await.unwrap(), SyncOutcome::Unchanged);
+    let state = SyncState::load(&org).unwrap().unwrap();
+    assert!(state.pinned);
+    assert!(!local_changes(&org, &state).await.unwrap());
 }

@@ -72,6 +72,23 @@ pub enum OrgCmd {
     },
     /// Compare the local copy with the remote and show who holds the lock.
     Status,
+    /// List the remote's generations, newest first.
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Make an old generation current again, as a new generation; history is kept.
+    Restore {
+        generation: u64,
+        /// Also bring back that generation's secrets and who could read them. Off by
+        /// default: an old snapshot may still let revoked keys in.
+        #[arg(long)]
+        with_secrets: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Push local changes that a failed command left unpushed (see `ikit org status`).
+    Push,
     /// Remove the remote lock left by a crashed or offline writer.
     Unlock {
         /// Required: removes the lock whoever holds it.
@@ -97,16 +114,43 @@ pub enum SecretsCmd {
     /// Let a public key (age1… or ssh-ed25519 …) read the org's secrets.
     Grant {
         key: String,
-        /// Whose key it is, e.g. alice@rg2k.
+        /// Whose key it is, e.g. alice@rg2k. Label a recovery key `recovery` and automation
+        /// keys `ci-…` so `check` can tell them from people.
         #[arg(long = "as", value_name = "LABEL")]
         label: Option<String>,
+        /// Grant only an environment's own secrets file (see `split`).
+        #[arg(long)]
+        env: Option<String>,
     },
     /// Stop a key (or label) from reading the secrets. Rotate what it could read: it may
     /// have kept a copy.
     Revoke {
         key_or_label: String,
+        /// Revoke from an environment's own secrets file instead of the org's.
+        #[arg(long)]
+        env: Option<String>,
         #[arg(long, short)]
         yes: bool,
+    },
+    /// Give an environment its own secrets file for a smaller group: its workloads' and hooks'
+    /// secrets move there, readable by your key and each --recipient.
+    Split {
+        env: String,
+        #[arg(long = "recipient", value_name = "KEY")]
+        recipients: Vec<String>,
+    },
+    /// Move an environment's secrets back into the org file; everyone who reads the org
+    /// file can then read them.
+    Merge {
+        env: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Fail if a secrets file has no recovery key or too few people to read it.
+    Check {
+        /// People (keys not labelled recovery… or ci…) each file needs.
+        #[arg(long, default_value_t = 2)]
+        min_people: usize,
     },
     /// Delete the keychain copies of secrets the encrypted file now holds.
     ForgetKeychain {
@@ -252,6 +296,9 @@ pub async fn run(ctx: &Ctx, cmd: OrgCmd) -> anyhow::Result<()> {
         OrgCmd::Pull { discard } => {
             let org = ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref())?;
             let report = ikit_app::org_pull(&ctx.paths, &org, discard).await?;
+            for n in &report.notices {
+                crate::warn(n);
+            }
             if ctx.output == Output::Json {
                 return print_json(&report);
             }
@@ -277,6 +324,54 @@ pub async fn run(ctx: &Ctx, cmd: OrgCmd) -> anyhow::Result<()> {
                 return print_json(&status);
             }
             render_status(&status, ikit_app::org_uses_secrets_file(&ctx.paths, &org));
+        }
+        OrgCmd::History { limit } => {
+            let org = ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref())?;
+            let history = ikit_app::org_history(&ctx.paths, &org, limit).await?;
+            if ctx.output == Output::Json {
+                return print_json(&history);
+            }
+            let mut t = table(&["GEN", "WHEN", "BY", "COMMAND"]);
+            for h in &history {
+                t.add_row(vec![
+                    format!("{}{}", h.generation, if h.current { " *" } else { "" }),
+                    h.written_at.format("%Y-%m-%d %H:%M").to_string(),
+                    h.written_by.clone().unwrap_or_default(),
+                    h.command
+                        .clone()
+                        .unwrap_or_else(|| "(no record)".to_owned()),
+                ]);
+            }
+            println!("{t}");
+        }
+        OrgCmd::Restore {
+            generation,
+            with_secrets,
+            yes,
+        } => {
+            let org = ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref())?;
+            let what = if with_secrets {
+                "its state, secrets and who can read them"
+            } else {
+                "its state (the current secrets and readers are kept)"
+            };
+            let question =
+                format!("Make generation {generation} of org `{org}` current again: {what}?");
+            if ctx.confirm(&question, yes)? {
+                let report =
+                    ikit_app::org_restore(&ctx.paths, &org, generation, with_secrets).await?;
+                if ctx.output == Output::Json {
+                    return print_json(&report);
+                }
+                println!("Restored generation {generation} of org `{org}`.");
+            }
+        }
+        OrgCmd::Push => {
+            // The command's write session pushes whatever is unpushed.
+            let org = ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref())?;
+            if ikit_app::remote_spec(&ctx.paths, &org)?.is_none() {
+                anyhow::bail!("org `{org}` has no remote");
+            }
         }
         OrgCmd::Unlock { force, yes } => {
             if !force {
@@ -434,44 +529,109 @@ async fn secrets(ctx: &Ctx, cmd: SecretsCmd) -> anyhow::Result<()> {
                 );
                 return Ok(());
             }
-            let mut t = table(&["RECIPIENT", "KEY", ""]);
-            for r in &info.recipients {
-                t.add_row(vec![
-                    r.label.clone().unwrap_or_default(),
-                    r.key.clone(),
-                    if info.me.as_deref() == Some(r.key.as_str()) {
-                        "you".to_owned()
-                    } else {
-                        String::new()
-                    },
-                ]);
+            let mut t = table(&["FILE", "RECIPIENT", "KEY", "SECRETS"]);
+            for scope in &info.scopes {
+                for (i, r) in scope.recipients.iter().enumerate() {
+                    let you = info.me.as_deref() == Some(r.key.as_str());
+                    t.add_row(vec![
+                        if i == 0 {
+                            format!("{}.age", scope.scope)
+                        } else {
+                            String::new()
+                        },
+                        format!(
+                            "{}{}",
+                            r.label.clone().unwrap_or_default(),
+                            if you { " (you)" } else { "" }
+                        ),
+                        r.key.clone(),
+                        match (i, scope.secrets) {
+                            (0, Some(n)) => n.to_string(),
+                            (0, None) => "you cannot read it".to_owned(),
+                            _ => String::new(),
+                        },
+                    ]);
+                }
             }
             println!("{t}");
-            match info.secrets {
-                Some(n) => println!("{n} secret(s) in {}.", info.file.expect("file").display()),
-                None => println!("This machine's key cannot read the secrets."),
-            }
         }
-        SecretsCmd::Grant { key, label } => {
-            if ikit_app::secrets_grant(&ctx.paths, &org, &ctx.identity, &key, label)? {
-                println!("Granted that key org `{org}`'s secrets.");
+        SecretsCmd::Grant { key, label, env } => {
+            let which = scope_words(&org, env.as_deref());
+            if ikit_app::secrets_grant(
+                &ctx.paths,
+                &org,
+                &ctx.identity,
+                &key,
+                label,
+                env.as_deref(),
+            )? {
+                println!("Granted that key {which}.");
             } else {
-                println!("That key can already read org `{org}`'s secrets.");
+                println!("That key can already read {which}.");
             }
         }
-        SecretsCmd::Revoke { key_or_label, yes } => {
+        SecretsCmd::Revoke {
+            key_or_label,
+            env,
+            yes,
+        } => {
             let question = format!(
-                "Revoke `{key_or_label}` from org `{org}`'s secrets? It may have kept a copy, so \
-                 rotate what it could read."
+                "Revoke `{key_or_label}` from {}? It may have kept a copy, so rotate what it \
+                 could read.",
+                scope_words(&org, env.as_deref())
             );
             if ctx.confirm(&question, yes)? {
-                let removed =
-                    ikit_app::secrets_revoke(&ctx.paths, &org, &ctx.identity, &key_or_label)?;
+                let removed = ikit_app::secrets_revoke(
+                    &ctx.paths,
+                    &org,
+                    &ctx.identity,
+                    &key_or_label,
+                    env.as_deref(),
+                )?;
                 println!(
                     "Revoked {}{}.",
                     removed.key,
                     removed.label.map(|l| format!(" ({l})")).unwrap_or_default()
                 );
+            }
+        }
+        SecretsCmd::Split { env, recipients } => {
+            let extra = recipients
+                .iter()
+                .map(|k| ikit_app::SecretsRecipient::parse(k))
+                .collect::<Result<Vec<_>, _>>()?;
+            let moved = ikit_app::secrets_split(&ctx.paths, &org, &ctx.identity, &env, extra)?;
+            println!(
+                "Org `{org}`'s {env} secrets now have their own file; moved {} secret(s). Grant \
+                 more readers with `ikit org secrets grant <key> --env {env}`.",
+                moved.len()
+            );
+        }
+        SecretsCmd::Merge { env, yes } => {
+            let question = format!(
+                "Move org `{org}`'s {env} secrets into the org file, readable by everyone who \
+                 reads that?"
+            );
+            if ctx.confirm(&question, yes)? {
+                let moved = ikit_app::secrets_merge(&ctx.paths, &org, &ctx.identity, &env)?;
+                println!("Moved {} {env} secret(s) into the org file.", moved.len());
+            }
+        }
+        SecretsCmd::Check { min_people } => {
+            let problems = ikit_app::secrets_check(&ctx.paths, &org, min_people)?;
+            if ctx.output == Output::Json {
+                print_json(&problems)?;
+            } else if problems.is_empty() {
+                println!(
+                    "Org `{org}`'s secrets files each have a recovery key and {min_people}+ people."
+                );
+            } else {
+                for p in &problems {
+                    println!("{}.age: {}", p.scope, p.problem);
+                }
+            }
+            if !problems.is_empty() {
+                std::process::exit(1);
             }
         }
         SecretsCmd::ForgetKeychain { yes } => {
@@ -493,6 +653,14 @@ async fn secrets(ctx: &Ctx, cmd: SecretsCmd) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// "org `x`'s secrets" or "org `x`'s prod secrets".
+fn scope_words(org: &str, env: Option<&str>) -> String {
+    match env {
+        Some(env) => format!("org `{org}`'s {env} secrets"),
+        None => format!("org `{org}`'s secrets"),
+    }
 }
 
 fn render_status(s: &RemoteStatus, secrets_file: bool) {

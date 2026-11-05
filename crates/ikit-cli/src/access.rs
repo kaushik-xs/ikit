@@ -24,7 +24,7 @@ pub enum Access {
     None,
     Read,
     Write,
-    /// A long-running server, which needs its own syncing (not supported with remotes yet).
+    /// A long-running server, which syncs around each request itself.
     Server,
 }
 
@@ -37,11 +37,17 @@ impl Command {
             Command::Org(c) => match c {
                 // The secrets file travels with the org's state.
                 OrgCmd::Secrets(s) => match s {
-                    SecretsCmd::List | SecretsCmd::ForgetKeychain { .. } => Read,
+                    SecretsCmd::List
+                    | SecretsCmd::ForgetKeychain { .. }
+                    | SecretsCmd::Check { .. } => Read,
                     SecretsCmd::Init { .. }
                     | SecretsCmd::Grant { .. }
-                    | SecretsCmd::Revoke { .. } => Write,
+                    | SecretsCmd::Revoke { .. }
+                    | SecretsCmd::Split { .. }
+                    | SecretsCmd::Merge { .. } => Write,
                 },
+                // Restore rewrites the local copy, which the write session then pushes.
+                OrgCmd::Restore { .. } | OrgCmd::Push => Write,
                 OrgCmd::Create { .. }
                 | OrgCmd::List
                 | OrgCmd::Show { .. }
@@ -51,6 +57,7 @@ impl Command {
                 | OrgCmd::Clone { .. }
                 | OrgCmd::Pull { .. }
                 | OrgCmd::Status
+                | OrgCmd::History { .. }
                 | OrgCmd::Unlock { .. } => Access::None,
             },
             Command::Profile(c) => match c {

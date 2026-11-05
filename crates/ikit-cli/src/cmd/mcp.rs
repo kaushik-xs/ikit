@@ -110,7 +110,7 @@ pub async fn run(ctx: &Ctx, cmd: McpCmd) -> anyhow::Result<()> {
             ikit_app::org_show(&ctx.paths, &org).await?;
             let scope = scope(&ctx.app().await?, &workloads).await?;
             tracing::info!(org, ?workloads, "serving MCP over stdio");
-            ikit_mcp::serve_stdio(ctx.paths.clone(), org, scope)
+            ikit_mcp::serve_stdio(ctx.paths.clone(), org, scope, ctx.identity.clone())
                 .await
                 .map_err(|e| anyhow::anyhow!(e))
         }
@@ -133,7 +133,7 @@ pub async fn run(ctx: &Ctx, cmd: McpCmd) -> anyhow::Result<()> {
             eprintln!(
                 "Serving MCP for org `{org}`{limited} at http://{addr}/mcp (Ctrl-C to stop)."
             );
-            ikit_mcp::serve_http(ctx.paths.clone(), org, scope, addr)
+            ikit_mcp::serve_http(ctx.paths.clone(), org, scope, ctx.identity.clone(), addr)
                 .await
                 .map_err(|e| anyhow::anyhow!("serving MCP on {addr}: {e}"))
         }

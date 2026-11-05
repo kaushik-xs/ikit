@@ -61,13 +61,15 @@ pub use registry::{AddVersion, Outdated, RegistryFilter};
 pub use registry_edit::{ServiceChanges, VersionChanges, VersionUpdate};
 pub use registry_ops::{ImageRef, SyncReport};
 pub use org_secrets::{
-    IDENTITY_ENV, IdentityOptions, SecretsInfo, SecretsInitReport, SecretsRecipient,
-    identity_create, identity_generate, identity_public, org_secret_store, org_uses_secrets_file,
-    secrets_grant, secrets_info, secrets_revoke,
+    IDENTITY_ENV, IdentityOptions, SecretsCheck, SecretsInfo, SecretsInitReport,
+    SecretsRecipient, SecretsScope, identity_create, identity_generate, identity_public,
+    org_secret_store, org_uses_secrets_file, secrets_check, secrets_grant, secrets_info,
+    secrets_merge, secrets_revoke, secrets_split,
 };
 pub use remote::{
-    PullReport, Remote, RemoteOverrides, RemoteStatus, Session, SessionOptions, SyncOutcome,
-    org_clone, org_lock_info, org_pull, org_status, org_unlock, remote_rm, remote_spec,
+    HistoryEntry, PullReport, Remote, RemoteOverrides, RemoteStatus, RestoreReport, Session,
+    SessionOptions, SyncOutcome, org_clone, org_history, org_lock_info, org_pull, org_restore,
+    org_status, org_unlock, remote_rm, remote_spec,
 };
 pub use routes::{RouteList, RouteRequest};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore};

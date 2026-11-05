@@ -13,6 +13,7 @@
 //! <prefix>/snapshots/000042.tar.zst
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,10 @@ use crate::{App, AppError, Paths, Result};
 const LEASE: Duration = Duration::from_secs(10 * 60);
 const RENEW_EVERY: Duration = Duration::from_secs(2 * 60);
 const POLL_EVERY: Duration = Duration::from_secs(2);
+/// Snapshots are kept while among the newest this many generations, or younger than
+/// [`KEEP_DAYS`]; older ones are pruned after each push.
+const KEEP_GENERATIONS: u64 = 50;
+const KEEP_DAYS: i64 = 90;
 
 const STATE_DB: &str = "state.db";
 /// Org files that travel with the state database, besides it.
@@ -89,6 +94,10 @@ struct SyncState {
     /// Content checksum of the cache right after that sync; anything else means local changes.
     baseline: String,
     synced_at: DateTime<Utc>,
+    /// The baseline was taken with the schema cookie pinned (see [`build_bundle`]); older
+    /// baselines are converted on first use by [`local_changes`].
+    #[serde(default)]
+    pinned: bool,
 }
 
 impl SyncState {
@@ -108,6 +117,7 @@ impl SyncState {
             generation,
             baseline,
             synced_at: Utc::now(),
+            pinned: true,
         };
         let json = serde_json::to_string_pretty(&state).expect("sync state serializes");
         std::fs::write(sync_file(org), json)?;
@@ -387,14 +397,101 @@ impl Remote {
             )));
         }
         let json = serde_json::to_vec_pretty(head).expect("head serializes");
-        if self.put_if("HEAD.json", json, base).await?.is_err() {
+        if self.put_if("HEAD.json", json.clone(), base).await?.is_err() {
             return Err(AppError::Invalid(format!(
                 "{}: the remote state changed while you were writing; your change was not \
                  pushed (see `ikit org status`)",
                 self.describe
             )));
         }
+        // The record only serves `ikit org history`; the generation is committed already.
+        if let Err(e) = self
+            .put_if(&Head::history_key(head.generation), json, None)
+            .await
+        {
+            tracing::warn!("recording generation {} in history: {e}", head.generation);
+        }
         Ok(())
+    }
+
+    async fn get_bytes(&self, rel: &str) -> Result<Vec<u8>> {
+        let got = self.store.get(&self.key(rel)).await.map_err(remote_error)?;
+        Ok(got.bytes().await.map_err(remote_error)?.to_vec())
+    }
+
+    /// Every snapshot object: (generation, key relative to the prefix, last modified).
+    async fn snapshots(&self) -> Result<Vec<(u64, String, DateTime<Utc>)>> {
+        use futures::TryStreamExt;
+        let base = self.key("snapshots");
+        let objects: Vec<object_store::ObjectMeta> = self
+            .store
+            .list(Some(&base))
+            .try_collect()
+            .await
+            .map_err(remote_error)?;
+        let strip = format!("{}/", self.key(""));
+        let mut out: Vec<_> = objects
+            .into_iter()
+            .filter_map(|m| {
+                let key = m.location.to_string();
+                let rel = key.strip_prefix(&strip).unwrap_or(&key).to_owned();
+                Head::snapshot_generation(&rel).map(|g| (g, rel, m.last_modified))
+            })
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    /// Generations newest first, from the history records, with snapshots written before
+    /// records existed filled in from the snapshot listing.
+    pub async fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
+        let (head, _) = self.head().await?.ok_or_else(|| no_head(self))?;
+        let mut by_gen: BTreeMap<u64, HistoryEntry> = BTreeMap::new();
+        for (generation, snapshot, at) in self.snapshots().await? {
+            if generation > head.generation {
+                continue; // left by a writer that never updated HEAD
+            }
+            by_gen.entry(generation).or_insert(HistoryEntry {
+                generation,
+                written_by: None,
+                written_at: at,
+                command: None,
+                snapshot,
+                current: false,
+            });
+        }
+        let wanted: Vec<u64> = by_gen.keys().rev().take(limit).copied().collect();
+        for generation in wanted.iter().copied() {
+            if generation == head.generation {
+                by_gen.insert(generation, HistoryEntry::from_head(&head, true));
+            } else if let Some((h, _)) = self
+                .get_json::<Head>(&Head::history_key(generation))
+                .await?
+            {
+                by_gen.insert(generation, HistoryEntry::from_head(&h, false));
+            }
+        }
+        Ok(wanted
+            .into_iter()
+            .filter_map(|g| by_gen.remove(&g))
+            .collect())
+    }
+
+    /// Deletes snapshots that are neither among the newest `keep` generations nor written
+    /// after `cutoff`, never HEAD's. Returns how many snapshots were deleted.
+    async fn prune(&self, head: &Head, keep: u64, cutoff: DateTime<Utc>) -> Result<usize> {
+        let snapshots = self.snapshots().await?;
+        let oldest_kept_gen = head.generation.saturating_sub(keep.saturating_sub(1));
+        let mut deleted = 0;
+        for (generation, key, at) in snapshots {
+            if key == head.snapshot || generation >= oldest_kept_gen || at >= cutoff {
+                continue;
+            }
+            self.delete(&key).await?;
+            self.delete(&Head::history_key(generation)).await?;
+            deleted += 1;
+        }
+        Ok(deleted)
     }
 }
 
@@ -462,6 +559,10 @@ impl Lease {
 /// The org's synced files as one uncompressed tar with fixed metadata, so equal contents
 /// give equal bytes. The database is copied with `VACUUM INTO` for a consistent snapshot.
 async fn build_bundle(org: &OrgPaths) -> Result<Vec<u8>> {
+    bundle(org, true).await
+}
+
+async fn bundle(org: &OrgPaths, pin_cookie: bool) -> Result<Vec<u8>> {
     let tmp = tempfile::Builder::new()
         .prefix(".bundle-")
         .tempdir_in(&org.dir)?;
@@ -479,7 +580,14 @@ async fn build_bundle(org: &OrgPaths) -> Result<Vec<u8>> {
         tar.append_data(&mut header, name, bytes)?;
         Ok(())
     };
-    add(STATE_DB, &std::fs::read(&db)?)?;
+    let mut db_bytes = std::fs::read(&db)?;
+    // `VACUUM INTO` writes the source's schema cookie plus one, so a database that came from
+    // a snapshot would differ by that counter from the one it was made from. Pin it: the copy
+    // is a standalone file no connection has open, and equal contents then give equal bytes.
+    if let Some(cookie) = db_bytes.get_mut(40..44).filter(|_| pin_cookie) {
+        cookie.copy_from_slice(&1u32.to_be_bytes());
+    }
+    add(STATE_DB, &db_bytes)?;
     for name in SYNCED_FILES {
         let path = org.dir.join(name);
         if path.exists() {
@@ -495,6 +603,20 @@ async fn build_bundle(org: &OrgPaths) -> Result<Vec<u8>> {
 /// Content checksum of the local cache.
 async fn fingerprint(org: &OrgPaths) -> Result<String> {
     Ok(checksum_bytes(&build_bundle(org).await?))
+}
+
+/// Whether the cache differs from what it was last synced to. A baseline from before the
+/// schema cookie was pinned is re-taken when the cache still matches it the old way.
+async fn local_changes(org: &OrgPaths, state: &SyncState) -> Result<bool> {
+    let current = fingerprint(org).await?;
+    if current == state.baseline {
+        return Ok(false);
+    }
+    if !state.pinned && checksum_bytes(&bundle(org, false).await?) == state.baseline {
+        SyncState::save(org, state.generation, current)?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn compress(tar: &[u8]) -> Result<Vec<u8>> {
@@ -591,12 +713,32 @@ async fn pull_into(remote: &Remote, org: &OrgPaths, head: &Head) -> Result<()> {
     SyncState::save(org, head.generation, fingerprint(org).await?)
 }
 
+/// [`pull_into`], describing changes to who can read the org's secrets.
+async fn pull_noticing(remote: &Remote, org: &OrgPaths, head: &Head) -> Result<Vec<String>> {
+    let before = crate::age_store::all_recipients(org);
+    pull_into(remote, org, head).await?;
+    let after = crate::age_store::all_recipients(org);
+    let changes = crate::age_store::recipient_changes(&before, &after);
+    if before.is_empty() || changes.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(changes
+        .into_iter()
+        .map(|c| {
+            format!(
+                "{c} (generation {}, written by {})",
+                head.generation, head.written_by
+            )
+        })
+        .collect())
+}
+
 fn new_head(org: &str, generation: u64, compressed: &[u8], content: String, command: &str) -> Head {
     Head {
         format: Head::FORMAT,
         org: org.to_owned(),
         generation,
-        snapshot: Head::snapshot_key(generation),
+        snapshot: Head::snapshot_key(generation, &random_id()[..8]),
         sha256: checksum_bytes(compressed),
         content_sha256: content,
         schema_version: ikit_state::schema_version(),
@@ -643,9 +785,16 @@ pub struct Session {
     baseline: String,
     lease: Option<Lease>,
     command: String,
+    notices: Vec<String>,
 }
 
 impl Session {
+    /// Things the person should know about what the pull brought in (e.g. who can now read
+    /// the org's secrets).
+    pub fn notices(&self) -> &[String] {
+        &self.notices
+    }
+
     /// Brings `org`'s cache up to its remote HEAD, taking the lock first when `write`.
     /// `None` when the org has no remote.
     pub async fn begin(
@@ -675,7 +824,7 @@ impl Session {
             None
         };
         match Self::sync(&remote, &org).await {
-            Ok((head, head_version, baseline)) => Ok(Self {
+            Ok((head, head_version, baseline, notices)) => Ok(Self {
                 remote,
                 org,
                 head,
@@ -683,6 +832,7 @@ impl Session {
                 baseline,
                 lease,
                 command: opts.command.clone(),
+                notices,
             }),
             Err(e) => {
                 if let Some(lease) = lease {
@@ -694,7 +844,10 @@ impl Session {
     }
 
     /// Pulls if the cache is behind and clean; returns HEAD and the cache's baseline.
-    async fn sync(remote: &Remote, org: &OrgPaths) -> Result<(Head, UpdateVersion, String)> {
+    async fn sync(
+        remote: &Remote,
+        org: &OrgPaths,
+    ) -> Result<(Head, UpdateVersion, String, Vec<String>)> {
         let (head, version) = remote.head().await?.ok_or_else(|| no_head(remote))?;
         if head.org != org.name {
             return Err(AppError::Invalid(format!(
@@ -705,18 +858,14 @@ impl Session {
         check_schema(remote, &head)?;
         let local = SyncState::load(org)?;
         let have_db = org.state_db().exists();
-        let current = if have_db {
-            Some(fingerprint(org).await?)
-        } else {
-            None
-        };
-        let dirty = match (&local, &current) {
-            (Some(s), Some(c)) => s.baseline != *c,
-            (None, Some(_)) => true,
-            (_, None) => false,
+        let dirty = match &local {
+            Some(s) if have_db => local_changes(org, s).await?,
+            None => have_db,
+            Some(_) => false,
         };
         let local_gen = local.as_ref().map(|s| s.generation).unwrap_or(0);
 
+        let mut notices = Vec::new();
         if head.generation != local_gen || !have_db {
             if dirty {
                 return Err(AppError::Invalid(format!(
@@ -726,7 +875,7 @@ impl Session {
                     org.name, remote.describe, head.generation
                 )));
             }
-            pull_into(remote, org, &head).await?;
+            notices = pull_noticing(remote, org, &head).await?;
         } else if migrate(org).await? && !dirty {
             // A newer ikit migrated the cache: that is not a change of anyone's.
             SyncState::save(org, local_gen, fingerprint(org).await?)?;
@@ -734,7 +883,7 @@ impl Session {
         let baseline = SyncState::load(org)?
             .map(|s| s.baseline)
             .unwrap_or_default();
-        Ok((head, version, baseline))
+        Ok((head, version, baseline, notices))
     }
 
     /// Pushes a new generation if the command changed anything, then releases the lock.
@@ -779,8 +928,47 @@ impl Session {
             .commit(Some(&self.head_version), &head, compressed)
             .await?;
         SyncState::save(&self.org, generation, content)?;
+        let cutoff = Utc::now() - chrono::Duration::days(KEEP_DAYS);
+        if let Err(e) = self.remote.prune(&head, KEEP_GENERATIONS, cutoff).await {
+            tracing::warn!("pruning old snapshots: {e}");
+        }
         Ok(SyncOutcome::Pushed { generation })
     }
+}
+
+/// One generation in `ikit org history`. Generations written before history records existed
+/// only have their snapshot's time.
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryEntry {
+    pub generation: u64,
+    pub written_by: Option<String>,
+    pub written_at: DateTime<Utc>,
+    pub command: Option<String>,
+    pub snapshot: String,
+    /// HEAD names it.
+    pub current: bool,
+}
+
+impl HistoryEntry {
+    fn from_head(head: &Head, current: bool) -> Self {
+        Self {
+            generation: head.generation,
+            written_by: Some(head.written_by.clone()),
+            written_at: head.written_at,
+            command: Some(head.command.clone()),
+            snapshot: head.snapshot.clone(),
+            current,
+        }
+    }
+}
+
+/// What `ikit org restore` put in the local copy (pushed as a new generation by the
+/// command's session).
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreReport {
+    pub org: String,
+    pub restored: u64,
+    pub secrets_restored: bool,
 }
 
 /// Where `ikit org status` stands.
@@ -803,6 +991,8 @@ pub struct PullReport {
     pub from: Option<u64>,
     pub to: u64,
     pub discarded_local_changes: bool,
+    /// Changes to who can read the org's secrets.
+    pub notices: Vec<String>,
 }
 
 /// The remote settings `remote set` derives from a storage and its profile.
@@ -1014,7 +1204,7 @@ pub async fn org_pull(paths: &Paths, org: &str, discard: bool) -> Result<PullRep
     let (head, _) = remote.head().await?.ok_or_else(|| no_head(&remote))?;
     let local = SyncState::load(&org_paths)?;
     let dirty = match &local {
-        Some(s) if org_paths.state_db().exists() => s.baseline != fingerprint(&org_paths).await?,
+        Some(s) if org_paths.state_db().exists() => local_changes(&org_paths, s).await?,
         _ => false,
     };
     if dirty && !discard {
@@ -1025,14 +1215,16 @@ pub async fn org_pull(paths: &Paths, org: &str, discard: bool) -> Result<PullRep
         )));
     }
     let from = local.map(|s| s.generation);
+    let mut notices = vec![];
     if dirty || from != Some(head.generation) {
-        pull_into(&remote, &org_paths, &head).await?;
+        notices = pull_noticing(&remote, &org_paths, &head).await?;
     }
     Ok(PullReport {
         org: org.to_owned(),
         from,
         to: head.generation,
         discarded_local_changes: dirty,
+        notices,
     })
 }
 
@@ -1042,7 +1234,7 @@ pub async fn org_status(paths: &Paths, org: &str) -> Result<RemoteStatus> {
     let org_paths = paths.org(org);
     let local = SyncState::load(&org_paths)?;
     let local_changes = match &local {
-        Some(s) if org_paths.state_db().exists() => s.baseline != fingerprint(&org_paths).await?,
+        Some(s) if org_paths.state_db().exists() => local_changes(&org_paths, s).await?,
         _ => false,
     };
     Ok(RemoteStatus {
@@ -1066,6 +1258,82 @@ pub async fn org_unlock(paths: &Paths, org: &str) -> Result<Option<LockInfo>> {
     Remote::open(&require_spec(paths, org)?)?
         .force_unlock()
         .await
+}
+
+pub async fn org_history(paths: &Paths, org: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+    Remote::open(&require_spec(paths, org)?)?.history(limit).await
+}
+
+/// Replaces the local copy with generation `generation`'s snapshot; run inside a write
+/// session, whose push then records it as a new generation. The current secrets and their
+/// recipients are kept unless `with_secrets`: an old snapshot may still let revoked keys in.
+pub async fn org_restore(
+    paths: &Paths,
+    org: &str,
+    generation: u64,
+    with_secrets: bool,
+) -> Result<RestoreReport> {
+    let remote = Remote::open(&require_spec(paths, org)?)?;
+    restore_into(&remote, &paths.org(org), generation, with_secrets).await
+}
+
+async fn restore_into(
+    remote: &Remote,
+    org: &OrgPaths,
+    generation: u64,
+    with_secrets: bool,
+) -> Result<RestoreReport> {
+    let entry = remote
+        .history(usize::MAX)
+        .await?
+        .into_iter()
+        .find(|e| e.generation == generation)
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "generation {generation} of org `{}` (see `ikit org history`)",
+                org.name
+            ))
+        })?;
+    let compressed = remote.get_bytes(&entry.snapshot).await?;
+    if let Some((h, _)) = remote
+        .get_json::<Head>(&Head::history_key(generation))
+        .await?
+    {
+        if checksum_bytes(&compressed) != h.sha256 {
+            return Err(AppError::Invalid(format!(
+                "snapshot of generation {generation} does not match its recorded checksum; \
+                 nothing was changed"
+            )));
+        }
+        check_schema(remote, &h)?;
+    }
+    let kept = if with_secrets {
+        None
+    } else {
+        Some(
+            synced_dir_files(org)?
+                .into_iter()
+                .map(|n| Ok((n.clone(), std::fs::read(org.dir.join(&n))?)))
+                .collect::<Result<Vec<_>>>()?,
+        )
+    };
+    extract_bundle(org, &compressed)?;
+    if let Some(kept) = kept {
+        for name in synced_dir_files(org)? {
+            std::fs::remove_file(org.dir.join(name))?;
+        }
+        for (name, bytes) in kept {
+            let path = org.dir.join(&name);
+            std::fs::create_dir_all(path.parent().expect("dir/file"))?;
+            std::fs::write(path, bytes)?;
+        }
+    }
+    migrate(org).await?;
+    Ok(RestoreReport {
+        org: org.name.clone(),
+        restored: generation,
+        secrets_restored: with_secrets,
+    })
 }
 
 #[cfg(test)]

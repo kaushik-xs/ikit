@@ -8,20 +8,34 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::age_store::{
-    AgeFileStore, IDENTITY_KEY, LocalIdentity, RecipientEntry, recipients_file, secrets_file,
-    uses_secrets_file,
+    AgeFileStore, IDENTITY_KEY, LocalIdentity, ORG_SCOPE, RecipientEntry, ScopeInfo,
+    recipients_file, secrets_file, uses_secrets_file,
 };
 use crate::{App, AppError, KeyringStore, Paths, Result, SecretStore};
 
-pub use crate::age_store::{IDENTITY_ENV, RecipientEntry as SecretsRecipient};
+pub use crate::age_store::{
+    IDENTITY_ENV, RecipientEntry as SecretsRecipient, ScopeInfo as SecretsScope,
+};
 
 /// Where this machine's private key comes from, besides `IKIT_AGE_IDENTITY` and the keychain.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IdentityOptions {
     /// An age key file, or an unencrypted SSH private key with its `.pub` beside it.
     pub file: Option<PathBuf>,
     /// A private key given directly (`AGE-SECRET-KEY-…`); wins over everything else.
     pub secret: Option<String>,
+    /// Whether to look further (`IKIT_AGE_IDENTITY`, the keychain) when neither is given.
+    pub lookup: bool,
+}
+
+impl Default for IdentityOptions {
+    fn default() -> Self {
+        Self {
+            file: None,
+            secret: None,
+            lookup: true,
+        }
+    }
 }
 
 impl IdentityOptions {
@@ -30,7 +44,19 @@ impl IdentityOptions {
         if let Some(secret) = &self.secret {
             return Ok(Some(LocalIdentity::from_secret(secret)?));
         }
+        if !self.lookup && self.file.is_none() {
+            return Ok(None);
+        }
         Ok(LocalIdentity::resolve(self.file.as_deref(), &KeyringStore)?)
+    }
+
+    /// Options that find no identity, for reading only who can read the secrets.
+    fn without_lookup(self) -> Self {
+        Self {
+            secret: None,
+            file: None,
+            lookup: false,
+        }
     }
 
     fn require(&self) -> Result<LocalIdentity> {
@@ -89,12 +115,17 @@ pub struct SecretsInfo {
     pub org: String,
     /// `keychain` or `file`.
     pub store: &'static str,
-    pub file: Option<PathBuf>,
-    pub recipients: Vec<RecipientEntry>,
+    /// The org file first, then one per environment that has its own.
+    pub scopes: Vec<ScopeInfo>,
     /// This machine's public key, when it has one.
     pub me: Option<String>,
-    /// Number of secrets, when this machine can read them.
-    pub secrets: Option<usize>,
+}
+
+/// One problem `ikit org secrets check` found.
+#[derive(Debug, Clone, Serialize)]
+pub struct SecretsCheck {
+    pub scope: String,
+    pub problem: String,
 }
 
 /// What `ikit org secrets init` moved.
@@ -130,34 +161,110 @@ pub fn secrets_info(paths: &Paths, org: &str, identity: &IdentityOptions) -> Res
         return Ok(SecretsInfo {
             org: org.to_owned(),
             store: "keychain",
-            file: None,
-            recipients: vec![],
+            scopes: vec![],
             me,
-            secrets: None,
         });
     }
-    let store = file_store(paths, org, identity)?;
     Ok(SecretsInfo {
         org: org.to_owned(),
         store: "file",
-        file: Some(secrets_file(&org_paths)),
-        recipients: store.recipients()?,
+        scopes: file_store(paths, org, identity)?.scopes()?,
         me,
-        secrets: store.keys().ok().map(|k| k.len()),
     })
 }
 
-/// Lets `key` read the org's secrets. Returns false when it already could.
+/// A recipient whose label starts with `recovery` is the offline break-glass key.
+fn is_recovery(r: &RecipientEntry) -> bool {
+    r.label.as_deref().is_some_and(|l| l.starts_with("recovery"))
+}
+
+/// A recipient whose label starts with `ci` is an automation key, not a person.
+fn is_automation(r: &RecipientEntry) -> bool {
+    r.label.as_deref().is_some_and(|l| l.starts_with("ci"))
+}
+
+/// Problems that could lock the team out of a secrets file: no recovery key (labelled
+/// `recovery…`), or fewer than `min_people` people (labels not `recovery…` or `ci…`).
+pub fn secrets_check(paths: &Paths, org: &str, min_people: usize) -> Result<Vec<SecretsCheck>> {
+    let store = file_store(paths, org, &IdentityOptions::default().without_lookup())?;
+    let mut problems = Vec::new();
+    for scope in store.scopes()? {
+        let people = scope
+            .recipients
+            .iter()
+            .filter(|r| !is_recovery(r) && !is_automation(r))
+            .count();
+        if !scope.recipients.iter().any(is_recovery) {
+            problems.push(SecretsCheck {
+                scope: scope.scope.clone(),
+                problem: "no recovery key (grant one with --as recovery)".to_owned(),
+            });
+        }
+        if people < min_people {
+            problems.push(SecretsCheck {
+                scope: scope.scope.clone(),
+                problem: format!(
+                    "{people} person can read it; at least {min_people} should, so one lost \
+                     laptop does not lock the team out"
+                ),
+            });
+        }
+    }
+    Ok(problems)
+}
+
+/// Gives environment `env` its own secrets file, readable by this machine's key and
+/// `extra`. Returns the keys moved out of the org file.
+pub fn secrets_split(
+    paths: &Paths,
+    org: &str,
+    identity: &IdentityOptions,
+    env: &str,
+    extra: Vec<RecipientEntry>,
+) -> Result<Vec<String>> {
+    let envs = crate::org_config(paths, org)?.envs;
+    if !envs.iter().any(|e| e == env) {
+        return Err(AppError::Invalid(format!(
+            "org `{org}` has no env `{env}` (its envs: {})",
+            envs.join(", ")
+        )));
+    }
+    let me = identity.require()?;
+    let mut recipients = vec![RecipientEntry {
+        key: me.public.clone(),
+        label: Some(crate::remote::whoami().0),
+    }];
+    for e in extra {
+        if !recipients.iter().any(|r| r.key == e.key) {
+            recipients.push(e);
+        }
+    }
+    Ok(file_store(paths, org, identity)?.split(env, &recipients)?)
+}
+
+/// Moves environment `env`'s secrets back into the org file. Returns the keys moved.
+pub fn secrets_merge(
+    paths: &Paths,
+    org: &str,
+    identity: &IdentityOptions,
+    env: &str,
+) -> Result<Vec<String>> {
+    Ok(file_store(paths, org, identity)?.merge(env)?)
+}
+
+/// Lets `key` read the org's secrets, or only environment `env`'s file. Returns false when it
+/// already could.
 pub fn secrets_grant(
     paths: &Paths,
     org: &str,
     identity: &IdentityOptions,
     key: &str,
     label: Option<String>,
+    env: Option<&str>,
 ) -> Result<bool> {
     let mut entry = RecipientEntry::parse(key)?;
     entry.label = label.or(entry.label);
-    Ok(file_store(paths, org, identity)?.grant(entry)?)
+    Ok(file_store(paths, org, identity)?.grant(env.unwrap_or(ORG_SCOPE), entry)?)
 }
 
 /// Stops the recipient with this key or label from reading future versions of the secrets.
@@ -166,8 +273,9 @@ pub fn secrets_revoke(
     org: &str,
     identity: &IdentityOptions,
     who: &str,
+    env: Option<&str>,
 ) -> Result<RecipientEntry> {
-    Ok(file_store(paths, org, identity)?.revoke(who)?)
+    Ok(file_store(paths, org, identity)?.revoke(env.unwrap_or(ORG_SCOPE), who)?)
 }
 
 impl App {

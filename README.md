@@ -74,9 +74,11 @@ ikit backup list | restore <id> | prune postgres --keep 7 | schedule postgres --
 ikit org remote set --storage s3                  # share the org: state goes to <prefix>/state/<org>
 ikit org clone s3://backups/ikit/state/acme --aws-profile me --region eu-central-1   # a teammate joins
 ikit org status | pull [--discard] | unlock --force | remote show | remote rm
+ikit org history | restore <gen> [--with-secrets] | push   # push: retry what a failed command left
 ikit identity create | show                       # this machine's key for encrypted org secrets
 ikit org secrets init [--recipient <key>]         # keychain -> secrets/org.age (remote set does it too)
-ikit org secrets list | grant <key> --as alice | revoke <key|label> | forget-keychain
+ikit org secrets list | grant <key> --as alice [--env prod] | revoke <key|label> [--env prod]
+ikit org secrets split prod [--recipient <key>] | merge prod | check | forget-keychain
 
 ikit registry version pin postgres 16.6            # deploy as image@sha256:… (required for prod)
 ikit registry sync postgres [--add]                # newer version tags from the image registry
@@ -143,6 +145,13 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
   `aws_profile`, a GCS credentials file, or the environment. `ikit mcp serve` refuses remote
   orgs.
 - `remote.yaml` (where the remote is) and `sync.json` (the generation the cache is at) stay local.
+- Every generation is kept as `snapshots/<gen>-<id>.tar.zst` plus `history/<gen>.json` (who,
+  when, which command). `org history` lists them; `org restore <gen>` makes one current again as
+  a new generation, keeping today's secrets and readers unless `--with-secrets`. Snapshots older
+  than 90 days and outside the newest 50 generations are pruned after each push.
+- A pull that changes who can read the org's secrets says so, naming who gained or lost access.
+- `ikit mcp serve` works on remote orgs: each tool call pulls first, and tools that change state
+  take the lock and push. Calls on one server run one at a time.
 
 ### Encrypted secrets
 
@@ -150,6 +159,9 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
   `secrets/org.age`, encrypted with [age](https://age-encryption.org/v1) to the public keys in
   `recipients/org.txt`. Both files travel with the remote state; nothing is ever stored in clear.
   The keychain copies stay until `ikit org secrets forget-keychain`.
+- `org secrets split prod` gives an environment its own file (`secrets/prod.age`,
+  `recipients/prod.txt`) for a smaller group: secrets of `prod` workloads and their hooks live
+  there; `grant|revoke --env prod` manage it; `merge prod` folds it back into `org.age`.
 - Each person runs `ikit identity create` once; the private key stays in the keychain and the
   printed `age1…` key is what a teammate grants. SSH keys work too: grant an `ssh-ed25519` public
   key and pass `--identity-file ~/.ssh/id_ed25519` (unencrypted keys only). CI sets
@@ -157,7 +169,9 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
 - Only a current recipient can change the secrets or who can read them. A revoked key cannot
   read later versions, but may have kept a copy (and old snapshots), so rotate what it could read.
 - Keep a recovery key: `ikit identity create --print-only`, store the private key offline, and
-  `ikit org secrets grant <its public key> --as recovery`.
+  `ikit org secrets grant <its public key> --as recovery`. `org secrets check` exits 1 when a
+  secrets file has no `recovery…` key or fewer than 2 people (keys not labelled `recovery…` or
+  `ci…`); run it in CI.
 
 ### Digest pinning
 
@@ -352,8 +366,8 @@ State lives in `~/.ikit` (override with `--home` or `IKIT_HOME`). Each org is fu
     ├── config.yaml           # display name, workload prefix (default wl-<org>), envs
     ├── mcp.yaml              # what MCP clients may do (optional)
     ├── mcp-tokens.yaml       # hashes of MCP HTTP bearer tokens
-    ├── recipients/org.txt    # public keys that can read secrets/org.age
-    ├── secrets/org.age       # the org's secrets, age-encrypted (after `org secrets init`)
+    ├── recipients/<file>.txt # public keys that can read secrets/<file>.age (org, or an env)
+    ├── secrets/<file>.age    # the org's secrets, age-encrypted (after `org secrets init`)
     ├── remote.yaml           # where the org's remote state lives (optional, never synced)
     ├── sync.json             # the remote generation the local copy is at
     └── workloads/<name>.yaml # spec generated after every change (not read back yet)
