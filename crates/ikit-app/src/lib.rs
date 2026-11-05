@@ -7,6 +7,7 @@ use std::sync::Arc;
 use ikit_core::{Config, ProfileError, ProfileKind, RegistryError, VersionError};
 use ikit_state::{SqliteStore, StateError, StateStore};
 
+mod age_store;
 mod aws_shared;
 mod backup;
 mod context;
@@ -20,6 +21,7 @@ mod hooks_sql;
 mod init;
 mod mcp_config;
 mod mcp_tokens;
+mod org_secrets;
 mod orgs;
 mod paths;
 mod profiles;
@@ -58,6 +60,11 @@ pub use profiles::AddProfile;
 pub use registry::{AddVersion, Outdated, RegistryFilter};
 pub use registry_edit::{ServiceChanges, VersionChanges, VersionUpdate};
 pub use registry_ops::{ImageRef, SyncReport};
+pub use org_secrets::{
+    IDENTITY_ENV, IdentityOptions, SecretsInfo, SecretsInitReport, SecretsRecipient,
+    identity_create, identity_generate, identity_public, org_secret_store, org_uses_secrets_file,
+    secrets_grant, secrets_info, secrets_revoke,
+};
 pub use remote::{
     PullReport, Remote, RemoteOverrides, RemoteStatus, Session, SessionOptions, SyncOutcome,
     org_clone, org_lock_info, org_pull, org_status, org_unlock, remote_rm, remote_spec,

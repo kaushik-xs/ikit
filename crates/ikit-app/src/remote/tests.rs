@@ -7,6 +7,18 @@ use super::*;
 use crate::testing::app;
 use crate::{MemorySecretStore, NewStorageRequest};
 
+/// A fresh identity given directly, so tests never read the real keychain: (options, public key).
+pub(crate) fn test_identity() -> (crate::IdentityOptions, String) {
+    let (secret, public) = crate::identity_generate();
+    (
+        crate::IdentityOptions {
+            secret: Some(secret),
+            ..Default::default()
+        },
+        public,
+    )
+}
+
 fn opts(command: &str) -> SessionOptions {
     SessionOptions {
         command: command.into(),
@@ -293,10 +305,11 @@ async fn remote_set_clone_pull_and_status_over_a_folder() {
     })
     .await
     .unwrap();
-    let (spec, head) = app
-        .remote_set("nas", RemoteOverrides::default(), "org remote set")
+    let (spec, head, secrets) = app
+        .remote_set("nas", RemoteOverrides::default(), &test_identity().0, "org remote set")
         .await
         .unwrap();
+    assert!(secrets.is_some(), "keychain secrets moved to the encrypted file");
     drop(app);
     assert_eq!(spec.prefix, "ikit/state/acme");
     assert_eq!(head.generation, 1);
@@ -310,6 +323,9 @@ async fn remote_set_clone_pull_and_status_over_a_folder() {
         .unwrap();
     assert_eq!(name, "acme");
     assert_eq!(storages(&bob).await, ["nas"]);
+    for f in ["recipients/org.txt", "secrets/org.age"] {
+        assert!(bob.org("acme").dir.join(f).exists(), "{f} travels with the state");
+    }
     assert!(
         org_clone(&bob, RemoteSpec::parse_url(&url).unwrap())
             .await
@@ -373,7 +389,7 @@ async fn remote_set_refuses_keychain_credentials() {
     .await
     .unwrap();
     let err = app
-        .remote_set("s3", RemoteOverrides::default(), "x")
+        .remote_set("s3", RemoteOverrides::default(), &test_identity().0, "x")
         .await
         .unwrap_err()
         .to_string();

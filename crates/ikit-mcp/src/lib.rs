@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ikit_app::{App, KeyringStore, Paths, RegistryFilter};
+use ikit_app::{App, IdentityOptions, Paths, RegistryFilter};
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -300,7 +300,10 @@ impl IkitServer {
     }
 
     async fn app(&self) -> Result<App, String> {
-        App::open(&self.paths, &self.org, Arc::new(KeyringStore))
+        let secrets =
+            ikit_app::org_secret_store(&self.paths, &self.org, &IdentityOptions::default())
+                .map_err(|e| e.to_string())?;
+        App::open(&self.paths, &self.org, secrets)
             .await
             .map_err(|e| e.to_string())
     }

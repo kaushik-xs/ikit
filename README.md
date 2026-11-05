@@ -74,6 +74,9 @@ ikit backup list | restore <id> | prune postgres --keep 7 | schedule postgres --
 ikit org remote set --storage s3                  # share the org: state goes to <prefix>/state/<org>
 ikit org clone s3://backups/ikit/state/acme --aws-profile me --region eu-central-1   # a teammate joins
 ikit org status | pull [--discard] | unlock --force | remote show | remote rm
+ikit identity create | show                       # this machine's key for encrypted org secrets
+ikit org secrets init [--recipient <key>]         # keychain -> secrets/org.age (remote set does it too)
+ikit org secrets list | grant <key> --as alice | revoke <key|label> | forget-keychain
 
 ikit registry version pin postgres 16.6            # deploy as image@sha256:… (required for prod)
 ikit registry sync postgres [--add]                # newer version tags from the image registry
@@ -136,10 +139,25 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
   Read-only commands take no lock and only pull. A waiting writer gives up after
   `--lock-timeout` seconds (default 60) and names the holder.
 - Local changes that were never pushed block pulling over them; `org pull --discard` drops them.
-- The remote must be reachable without the org's keychain: use an `aws` profile with
-  `aws_profile`, a GCS credentials file, or the environment. Keychain secrets are not shared
-  yet, so each person sets them on their own machine. `ikit mcp serve` refuses remote orgs.
+- The remote must be reachable without the org's secrets: use an `aws` profile with
+  `aws_profile`, a GCS credentials file, or the environment. `ikit mcp serve` refuses remote
+  orgs.
 - `remote.yaml` (where the remote is) and `sync.json` (the generation the cache is at) stay local.
+
+### Encrypted secrets
+
+- `ikit org secrets init` (and `org remote set`) moves an org's secrets from the keychain into
+  `secrets/org.age`, encrypted with [age](https://age-encryption.org/v1) to the public keys in
+  `recipients/org.txt`. Both files travel with the remote state; nothing is ever stored in clear.
+  The keychain copies stay until `ikit org secrets forget-keychain`.
+- Each person runs `ikit identity create` once; the private key stays in the keychain and the
+  printed `age1…` key is what a teammate grants. SSH keys work too: grant an `ssh-ed25519` public
+  key and pass `--identity-file ~/.ssh/id_ed25519` (unencrypted keys only). CI sets
+  `IKIT_AGE_IDENTITY` to a key from `ikit identity create --print-only`.
+- Only a current recipient can change the secrets or who can read them. A revoked key cannot
+  read later versions, but may have kept a copy (and old snapshots), so rotate what it could read.
+- Keep a recovery key: `ikit identity create --print-only`, store the private key offline, and
+  `ikit org secrets grant <its public key> --as recovery`.
 
 ### Digest pinning
 
@@ -334,6 +352,8 @@ State lives in `~/.ikit` (override with `--home` or `IKIT_HOME`). Each org is fu
     ├── config.yaml           # display name, workload prefix (default wl-<org>), envs
     ├── mcp.yaml              # what MCP clients may do (optional)
     ├── mcp-tokens.yaml       # hashes of MCP HTTP bearer tokens
+    ├── recipients/org.txt    # public keys that can read secrets/org.age
+    ├── secrets/org.age       # the org's secrets, age-encrypted (after `org secrets init`)
     ├── remote.yaml           # where the org's remote state lives (optional, never synced)
     ├── sync.json             # the remote generation the local copy is at
     └── workloads/<name>.yaml # spec generated after every change (not read back yet)
@@ -345,8 +365,8 @@ State lives in `~/.ikit` (override with `--home` or `IKIT_HOME`). Each org is fu
 - A home created before orgs existed is moved into the `default` org by `ikit init`, keeping
   the `wl` prefix, so existing names don't change.
 - Secrets (profile tokens and keys, service env vars marked `secret`) are kept in the OS keychain
-  under the service `ikit`, namespaced per org (`org/<org>/...`), never in `state.db` or the
-  spec files. Enter them at a prompt, or via
+  under the service `ikit`, namespaced per org (`org/<org>/...`), or in the org's encrypted
+  `secrets/org.age` once it has one; never in `state.db` or the spec files. Enter them at a prompt, or via
   `IKIT_SECRET_<FIELD>` for profiles and `IKIT_SECRET_<SERVICE>_<VAR>` for services.
 
 ## Layout

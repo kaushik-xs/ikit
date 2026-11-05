@@ -3,6 +3,7 @@ pub mod deploy;
 pub mod edge;
 pub mod group;
 pub mod hook;
+pub mod identity;
 pub mod init;
 pub mod mcp;
 pub mod net;

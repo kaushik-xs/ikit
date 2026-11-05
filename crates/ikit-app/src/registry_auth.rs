@@ -6,7 +6,7 @@ use ikit_core::registry::RegistryLogin;
 use crate::{App, AppError, Result};
 
 impl App {
-    fn registry_secret_key(&self, host: &str) -> String {
+    pub(crate) fn registry_secret_key(&self, host: &str) -> String {
         format!("org/{}/registry/{host}", self.org.name)
     }
 

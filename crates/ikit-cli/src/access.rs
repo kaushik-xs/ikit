@@ -9,6 +9,7 @@ use crate::cmd::group::GroupCmd;
 use crate::cmd::hook::HookCmd;
 use crate::cmd::mcp::{McpCmd, TokenCmd};
 use crate::cmd::net::{DockerCmd, NetCmd, ZtCmd};
+use crate::cmd::org::{OrgCmd, SecretsCmd};
 use crate::cmd::profile::ProfileCmd;
 use crate::cmd::registry::RegistryCmd;
 use crate::cmd::route::RouteCmd;
@@ -32,7 +33,26 @@ use Access::{Read, Write};
 impl Command {
     pub fn access(&self) -> Access {
         match self {
-            Command::Init | Command::Org(_) => Access::None,
+            Command::Init | Command::Identity(_) => Access::None,
+            Command::Org(c) => match c {
+                // The secrets file travels with the org's state.
+                OrgCmd::Secrets(s) => match s {
+                    SecretsCmd::List | SecretsCmd::ForgetKeychain { .. } => Read,
+                    SecretsCmd::Init { .. }
+                    | SecretsCmd::Grant { .. }
+                    | SecretsCmd::Revoke { .. } => Write,
+                },
+                OrgCmd::Create { .. }
+                | OrgCmd::List
+                | OrgCmd::Show { .. }
+                | OrgCmd::Use { .. }
+                | OrgCmd::Rm { .. }
+                | OrgCmd::Remote(_)
+                | OrgCmd::Clone { .. }
+                | OrgCmd::Pull { .. }
+                | OrgCmd::Status
+                | OrgCmd::Unlock { .. } => Access::None,
+            },
             Command::Profile(c) => match c {
                 ProfileCmd::List { .. } | ProfileCmd::Show { .. } | ProfileCmd::Fields { .. } => {
                     Read

@@ -39,6 +39,10 @@ pub enum OrgCmd {
     /// Keep the org's state in object storage, so a team shares one copy.
     #[command(subcommand)]
     Remote(RemoteCmd),
+    /// Keep the org's secrets in an encrypted file that travels with its state, readable by
+    /// the keys you grant.
+    #[command(subcommand)]
+    Secrets(SecretsCmd),
     /// Create a local org from remote state, e.g. s3://bucket/ikit/state/<org>.
     Clone {
         /// s3://bucket/prefix, az://container/prefix, gs://bucket/prefix or local:/folder/prefix.
@@ -73,6 +77,39 @@ pub enum OrgCmd {
         /// Required: removes the lock whoever holds it.
         #[arg(long)]
         force: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretsCmd {
+    /// Move the org's secrets from the keychain into secrets/org.age, readable by this
+    /// machine's key and any --recipient. Keychain copies stay until `forget-keychain`.
+    Init {
+        /// Another public key that can read the secrets, e.g. a recovery key (repeatable).
+        #[arg(long = "recipient", value_name = "KEY")]
+        recipients: Vec<String>,
+    },
+    /// Show who can read the org's secrets.
+    #[command(alias = "ls")]
+    List,
+    /// Let a public key (age1… or ssh-ed25519 …) read the org's secrets.
+    Grant {
+        key: String,
+        /// Whose key it is, e.g. alice@rg2k.
+        #[arg(long = "as", value_name = "LABEL")]
+        label: Option<String>,
+    },
+    /// Stop a key (or label) from reading the secrets. Rotate what it could read: it may
+    /// have kept a copy.
+    Revoke {
+        key_or_label: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Delete the keychain copies of secrets the encrypted file now holds.
+    ForgetKeychain {
         #[arg(long, short)]
         yes: bool,
     },
@@ -182,6 +219,7 @@ pub async fn run(ctx: &Ctx, cmd: OrgCmd) -> anyhow::Result<()> {
             }
         }
         OrgCmd::Remote(cmd) => remote(ctx, cmd).await?,
+        OrgCmd::Secrets(cmd) => secrets(ctx, cmd).await?,
         OrgCmd::Clone {
             url,
             aws_profile,
@@ -238,7 +276,7 @@ pub async fn run(ctx: &Ctx, cmd: OrgCmd) -> anyhow::Result<()> {
             if ctx.output == Output::Json {
                 return print_json(&status);
             }
-            render_status(&status);
+            render_status(&status, ikit_app::org_uses_secrets_file(&ctx.paths, &org));
         }
         OrgCmd::Unlock { force, yes } => {
             if !force {
@@ -279,11 +317,18 @@ async fn remote(ctx: &Ctx, cmd: RemoteCmd) -> anyhow::Result<()> {
                 aws_profile,
                 region,
             };
-            let (spec, head) = app
-                .remote_set(&storage, overrides, &crate::command_line())
+            let (spec, head, moved) = app
+                .remote_set(&storage, overrides, &ctx.identity, &crate::command_line())
                 .await?;
             if ctx.output == Output::Json {
                 return print_json(&head);
+            }
+            if let Some(report) = moved {
+                println!(
+                    "Moved {} secret(s) from the keychain into {}, readable by your key.",
+                    report.moved.len(),
+                    report.file.display()
+                );
             }
             println!(
                 "Org `{org}` now keeps its state in {} (generation {}).",
@@ -348,7 +393,106 @@ async fn remote(ctx: &Ctx, cmd: RemoteCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_status(s: &RemoteStatus) {
+async fn secrets(ctx: &Ctx, cmd: SecretsCmd) -> anyhow::Result<()> {
+    let org = ikit_app::resolve_org(&ctx.paths, ctx.org.as_deref())?;
+    match cmd {
+        SecretsCmd::Init { recipients } => {
+            let extra = recipients
+                .iter()
+                .map(|k| ikit_app::SecretsRecipient::parse(k))
+                .collect::<Result<Vec<_>, _>>()?;
+            let report = ctx.app().await?.secrets_init(&ctx.identity, extra).await?;
+            if ctx.output == Output::Json {
+                return print_json(&report);
+            }
+            println!(
+                "Moved {} secret(s) for org `{org}` into {}, readable by {} key(s).",
+                report.moved.len(),
+                report.file.display(),
+                report.recipients.len()
+            );
+            if !report.missing.is_empty() {
+                crate::warn(format!(
+                    "not in this machine's keychain, so not moved (set them again): {}",
+                    report.missing.join(", ")
+                ));
+            }
+            println!(
+                "Keychain copies are kept; remove them with `ikit org secrets forget-keychain` once                  a second machine has read the file."
+            );
+        }
+        SecretsCmd::List => {
+            let info = ikit_app::secrets_info(&ctx.paths, &org, &ctx.identity)?;
+            if ctx.output == Output::Json {
+                return print_json(&info);
+            }
+            if info.store == "keychain" {
+                println!(
+                    "Org `{org}` keeps its secrets in this machine's keychain (not shared). Move                      them into an encrypted file with `ikit org secrets init`."
+                );
+                return Ok(());
+            }
+            let mut t = table(&["RECIPIENT", "KEY", ""]);
+            for r in &info.recipients {
+                t.add_row(vec![
+                    r.label.clone().unwrap_or_default(),
+                    r.key.clone(),
+                    if info.me.as_deref() == Some(r.key.as_str()) {
+                        "you".to_owned()
+                    } else {
+                        String::new()
+                    },
+                ]);
+            }
+            println!("{t}");
+            match info.secrets {
+                Some(n) => println!("{n} secret(s) in {}.", info.file.expect("file").display()),
+                None => println!("This machine's key cannot read the secrets."),
+            }
+        }
+        SecretsCmd::Grant { key, label } => {
+            if ikit_app::secrets_grant(&ctx.paths, &org, &ctx.identity, &key, label)? {
+                println!("Granted that key org `{org}`'s secrets.");
+            } else {
+                println!("That key can already read org `{org}`'s secrets.");
+            }
+        }
+        SecretsCmd::Revoke { key_or_label, yes } => {
+            let question = format!(
+                "Revoke `{key_or_label}` from org `{org}`'s secrets? It may have kept a copy, so                  rotate what it could read."
+            );
+            if ctx.confirm(&question, yes)? {
+                let removed =
+                    ikit_app::secrets_revoke(&ctx.paths, &org, &ctx.identity, &key_or_label)?;
+                println!(
+                    "Revoked {}{}.",
+                    removed.key,
+                    removed.label.map(|l| format!(" ({l})")).unwrap_or_default()
+                );
+            }
+        }
+        SecretsCmd::ForgetKeychain { yes } => {
+            let question = format!(
+                "Delete this machine's keychain copies of org `{org}`'s secrets? The encrypted file keeps them."
+            );
+            if ctx.confirm(&question, yes)? {
+                let deleted = ctx
+                    .app()
+                    .await?
+                    .secrets_forget_keychain(&KeyringStore)
+                    .await?;
+                println!(
+                    "Deleted {} keychain entr{}.",
+                    deleted.len(),
+                    if deleted.len() == 1 { "y" } else { "ies" }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_status(s: &RemoteStatus, secrets_file: bool) {
     let mut t = table(&[]);
     t.add_row(vec!["org".to_owned(), s.org.clone()]);
     t.add_row(vec!["remote".to_owned(), s.remote.clone()]);
@@ -387,6 +531,14 @@ fn render_status(s: &RemoteStatus) {
         None => "free".to_owned(),
     };
     t.add_row(vec!["lock".to_owned(), lock]);
+    t.add_row(vec![
+        "secrets".to_owned(),
+        if secrets_file {
+            "encrypted file, shared (see `ikit org secrets list`)".to_owned()
+        } else {
+            "this machine's keychain, not shared (`ikit org secrets init` to share)".to_owned()
+        },
+    ]);
     println!("{t}");
 }
 

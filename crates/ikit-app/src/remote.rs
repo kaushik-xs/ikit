@@ -38,6 +38,41 @@ const POLL_EVERY: Duration = Duration::from_secs(2);
 const STATE_DB: &str = "state.db";
 /// Org files that travel with the state database, besides it.
 const SYNCED_FILES: &[&str] = &["config.yaml", "mcp.yaml", "mcp-tokens.yaml"];
+/// Org folders whose `<slug><extension>` files travel too: the encrypted secrets and who
+/// can read them.
+const SYNCED_DIRS: &[(&str, &str)] = &[("recipients", ".txt"), ("secrets", ".age")];
+
+/// Whether `name` (`dir/file`) is a file of a synced folder.
+fn is_synced_dir_file(name: &str) -> bool {
+    let Some((dir, file)) = name.split_once('/') else {
+        return false;
+    };
+    SYNCED_DIRS.iter().any(|(d, ext)| {
+        *d == dir
+            && file
+                .strip_suffix(ext)
+                .is_some_and(ikit_core::is_slug)
+    })
+}
+
+/// The synced folders' files present locally, as `dir/file`, sorted.
+fn synced_dir_files(org: &OrgPaths) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for (dir, _) in SYNCED_DIRS {
+        let path = org.dir.join(dir);
+        if !path.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(path)? {
+            let name = format!("{dir}/{}", entry?.file_name().to_string_lossy());
+            if is_synced_dir_file(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
 
 fn remote_file(org: &OrgPaths) -> PathBuf {
     org.dir.join("remote.yaml")
@@ -103,7 +138,7 @@ fn remote_error(e: object_store::Error) -> AppError {
 }
 
 /// Who is acting, for lock and HEAD records: `user@host`.
-fn whoami() -> (String, String) {
+pub(crate) fn whoami() -> (String, String) {
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".into());
@@ -451,6 +486,9 @@ async fn build_bundle(org: &OrgPaths) -> Result<Vec<u8>> {
             add(name, &std::fs::read(&path)?)?;
         }
     }
+    for name in synced_dir_files(org)? {
+        add(&name, &std::fs::read(org.dir.join(&name))?)?;
+    }
     Ok(tar.into_inner()?)
 }
 
@@ -476,12 +514,19 @@ fn extract_bundle(org: &OrgPaths, compressed: &[u8]) -> Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.to_string_lossy().into_owned();
-        if name != STATE_DB && !SYNCED_FILES.contains(&name.as_str()) {
+        if name != STATE_DB
+            && !SYNCED_FILES.contains(&name.as_str())
+            && !is_synced_dir_file(&name)
+        {
             return Err(AppError::Invalid(format!(
                 "remote snapshot holds an unexpected file `{name}`; nothing was changed"
             )));
         }
-        let mut file = std::fs::File::create(tmp.path().join(&name))?;
+        let path = tmp.path().join(&name);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::File::create(path)?;
         std::io::copy(&mut entry, &mut file)?;
         found.push(name);
     }
@@ -504,6 +549,16 @@ fn extract_bundle(org: &OrgPaths, compressed: &[u8]) -> Result<()> {
         } else if target.exists() {
             std::fs::remove_file(target)?;
         }
+    }
+    for name in synced_dir_files(org)? {
+        if !found.contains(&name) {
+            std::fs::remove_file(org.dir.join(&name))?;
+        }
+    }
+    for name in found.iter().filter(|n| is_synced_dir_file(n)) {
+        let target = org.dir.join(name);
+        std::fs::create_dir_all(target.parent().expect("dir/file"))?;
+        std::fs::rename(tmp.path().join(name), target)?;
     }
     Ok(())
 }
@@ -761,12 +816,15 @@ pub struct RemoteOverrides {
 impl App {
     /// Makes this org remote: its state goes to `<storage prefix>/state/<org>` in `storage`,
     /// as generation 1. Refused if that path already holds state.
+    /// Unless the org already has one, its keychain secrets are first moved into an
+    /// encrypted file readable by `identity`, so they travel with the state.
     pub async fn remote_set(
         &self,
         storage: &str,
         overrides: RemoteOverrides,
+        identity: &crate::IdentityOptions,
         command: &str,
-    ) -> Result<(RemoteSpec, Head)> {
+    ) -> Result<(RemoteSpec, Head, Option<crate::SecretsInitReport>)> {
         if remote_spec(&self.paths, &self.org.name)?.is_some() {
             return Err(AppError::AlreadyExists(format!(
                 "a remote for org `{}` (remove it with `ikit org remote rm`)",
@@ -775,9 +833,20 @@ impl App {
         }
         let spec = self.spec_from_storage(storage, overrides).await?;
         let remote = Remote::open(&spec)?;
+        if let Some((head, _)) = remote.head().await? {
+            return Err(AppError::AlreadyExists(format!(
+                "remote state at {} (org `{}`, generation {}); use `ikit org clone` to work on it",
+                remote.describe, head.org, head.generation
+            )));
+        }
+        let secrets = if crate::org_uses_secrets_file(&self.paths, &self.org.name) {
+            None
+        } else {
+            Some(self.secrets_init(identity, vec![]).await?)
+        };
         let head = push_initial(&remote, &self.org, command).await?;
         save_spec(&self.org, &spec)?;
-        Ok((spec, head))
+        Ok((spec, head, secrets))
     }
 
     async fn spec_from_storage(
@@ -1009,4 +1078,4 @@ pub(crate) fn test_remote() -> Remote {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

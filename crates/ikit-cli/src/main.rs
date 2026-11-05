@@ -40,6 +40,11 @@ struct Cli {
     #[arg(long, global = true)]
     no_input: bool,
 
+    /// Private key for orgs with encrypted secrets: an age key file, or an unencrypted SSH
+    /// key with its .pub beside it (default: IKIT_AGE_IDENTITY, then the keychain).
+    #[arg(long, global = true, env = "IKIT_IDENTITY_FILE", value_name = "FILE")]
+    identity_file: Option<PathBuf>,
+
     /// Seconds to wait for another writer to release an org's remote lock.
     #[arg(
         long,
@@ -67,6 +72,9 @@ enum Command {
     /// Manage orgs: each has its own state database, registry, targets and workloads.
     #[command(subcommand)]
     Org(cmd::org::OrgCmd),
+    /// This machine's key for reading orgs' encrypted secrets.
+    #[command(subcommand)]
+    Identity(cmd::identity::IdentityCmd),
     /// Manage provider profiles (aws, azure, gcp, zerotier, k8s).
     #[command(subcommand)]
     Profile(cmd::profile::ProfileCmd),
@@ -141,12 +149,16 @@ enum Command {
 impl Ctx {
     pub async fn app(&self) -> anyhow::Result<ikit_app::App> {
         let org = ikit_app::resolve_org(&self.paths, self.org.as_deref())?;
-        Ok(ikit_app::App::open(
+        Ok(ikit_app::App::open(&self.paths, &org, self.secrets(&org)?).await?)
+    }
+
+    /// The secret store `org` uses: its encrypted file, or the keychain.
+    pub fn secrets(&self, org: &str) -> anyhow::Result<std::sync::Arc<dyn ikit_app::SecretStore>> {
+        Ok(ikit_app::org_secret_store(
             &self.paths,
-            &org,
-            std::sync::Arc::new(ikit_app::KeyringStore),
-        )
-        .await?)
+            org,
+            &self.identity,
+        )?)
     }
 
     /// Asks for confirmation unless `yes`; fails when prompts are disabled.
@@ -176,6 +188,7 @@ pub struct Ctx {
     pub wl: Option<String>,
     pub output: Output,
     pub interactive: bool,
+    pub identity: ikit_app::IdentityOptions,
 }
 
 #[tokio::main]
@@ -196,6 +209,10 @@ async fn main() -> anyhow::Result<()> {
         wl: cli.wl,
         output: cli.output,
         interactive: !cli.no_input && std::io::stdin().is_terminal(),
+        identity: ikit_app::IdentityOptions {
+            file: cli.identity_file,
+            ..Default::default()
+        },
     };
 
     let access = cli.command.access();
@@ -255,6 +272,7 @@ async fn dispatch(ctx: &Ctx, command: Command) -> anyhow::Result<()> {
     match command {
         Command::Init => cmd::init::run(ctx).await,
         Command::Org(c) => cmd::org::run(ctx, c).await,
+        Command::Identity(c) => cmd::identity::run(ctx, c).await,
         Command::Profile(c) => cmd::profile::run(ctx, c).await,
         Command::Registry(c) => cmd::registry::run(ctx, c).await,
         Command::Target(c) => cmd::target::run(ctx, c).await,

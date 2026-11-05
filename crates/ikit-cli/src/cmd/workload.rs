@@ -179,12 +179,7 @@ async fn use_workload(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
             None => ikit_app::resolve_org(&ctx.paths, None)?,
         },
     };
-    let app = ikit_app::App::open(
-        &ctx.paths,
-        &org,
-        std::sync::Arc::new(ikit_app::KeyringStore),
-    )
-    .await?;
+    let app = ikit_app::App::open(&ctx.paths, &org, ctx.secrets(&org)?).await?;
     let workload = app.workload_use(name).await?;
     ikit_app::org_use(&ctx.paths, &org)?;
     if ctx.output == Output::Json {
@@ -197,12 +192,7 @@ async fn use_workload(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
 async fn list_all_orgs(ctx: &Ctx, env: Option<&str>) -> anyhow::Result<()> {
     let mut rows = Vec::new();
     for org in ikit_app::org_list(&ctx.paths).await? {
-        let app = ikit_app::App::open(
-            &ctx.paths,
-            &org.name,
-            std::sync::Arc::new(ikit_app::KeyringStore),
-        )
-        .await?;
+        let app = ikit_app::App::open(&ctx.paths, &org.name, ctx.secrets(&org.name)?).await?;
         for w in app.workload_list(env).await? {
             rows.push((org.name.clone(), w));
         }

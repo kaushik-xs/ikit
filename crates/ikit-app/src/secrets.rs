@@ -14,7 +14,7 @@ pub trait SecretStore: Send + Sync {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("keychain error: {0}")]
+#[error("{0}")]
 pub struct SecretError(String);
 
 impl SecretError {
@@ -23,13 +23,17 @@ impl SecretError {
     }
 }
 
+fn keychain_error(e: keyring::Error) -> SecretError {
+    SecretError(format!("keychain error: {e}"))
+}
+
 /// Stores each secret as a generic password under [`KEYRING_SERVICE`], with `key` as the account.
 #[derive(Debug, Default)]
 pub struct KeyringStore;
 
 impl KeyringStore {
     fn entry(key: &str) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(KEYRING_SERVICE, key).map_err(|e| SecretError(e.to_string()))
+        keyring::Entry::new(KEYRING_SERVICE, key).map_err(keychain_error)
     }
 }
 
@@ -38,20 +42,20 @@ impl SecretStore for KeyringStore {
         match Self::entry(key)?.get_password() {
             Ok(v) => Ok(Some(v)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(SecretError(e.to_string())),
+            Err(e) => Err(keychain_error(e)),
         }
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
         Self::entry(key)?
             .set_password(value)
-            .map_err(|e| SecretError(e.to_string()))
+            .map_err(keychain_error)
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretError> {
         match Self::entry(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(SecretError(e.to_string())),
+            Err(e) => Err(keychain_error(e)),
         }
     }
 }
