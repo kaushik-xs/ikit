@@ -149,11 +149,24 @@ impl App {
             StorageProvider::S3 => {
                 let mut b = object_store::aws::AmazonS3Builder::from_env()
                     .with_bucket_name(&storage.bucket);
-                if let Some(region) = o.region.clone().or_else(|| get("region")) {
+                // Static keys on the ikit profile win over a named profile in ~/.aws.
+                let shared = match (get("access_key_id"), get("aws_profile")) {
+                    (None, Some(name)) => Some(crate::aws_shared::load(&name)?),
+                    _ => None,
+                };
+                let shared_region = shared.as_ref().and_then(|s| s.region.clone());
+                if let Some(region) = o.region.clone().or_else(|| get("region")).or(shared_region) {
                     b = b.with_region(region);
                 }
                 if let (Some(id), Some(secret)) = (get("access_key_id"), get("secret_access_key")) {
                     b = b.with_access_key_id(id).with_secret_access_key(secret);
+                } else if let Some(s) = shared {
+                    b = b
+                        .with_access_key_id(s.access_key_id)
+                        .with_secret_access_key(s.secret_access_key);
+                    if let Some(token) = s.session_token {
+                        b = b.with_token(token);
+                    }
                 }
                 if let Some(endpoint) = &o.endpoint {
                     // S3-compatible stores (MinIO) use path-style URLs and often plain HTTP.

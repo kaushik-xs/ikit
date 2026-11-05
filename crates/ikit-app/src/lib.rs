@@ -7,6 +7,7 @@ use std::sync::Arc;
 use ikit_core::{Config, ProfileError, ProfileKind, RegistryError, VersionError};
 use ikit_state::{SqliteStore, StateError, StateStore};
 
+mod aws_shared;
 mod backup;
 mod context;
 mod deploy;

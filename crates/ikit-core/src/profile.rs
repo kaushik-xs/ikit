@@ -71,7 +71,11 @@ use Requirement::{Optional, Required, RequiredWith};
 
 const AWS_FIELDS: &[FieldSpec] = &[
     FieldSpec::new("region", "Default AWS region, e.g. eu-west-1", Required),
-    FieldSpec::new("aws_profile", "Named profile from ~/.aws/config", Optional),
+    FieldSpec::new(
+        "aws_profile",
+        "Named profile in ~/.aws/credentials (used when access_key_id is unset)",
+        Optional,
+    ),
     FieldSpec::new(
         "access_key_id",
         "Static access key id (omit to use the default credential chain)",

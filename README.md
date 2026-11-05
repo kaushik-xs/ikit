@@ -116,7 +116,9 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
 - `backup run` dumps inside the service's container (`pg_dump -Fc`, `mysqldump`), compresses
   with zstd and uploads to a storage; the catalog keeps size and SHA-256. `restore` verifies the
   checksum, then `pg_restore --clean` (or `mysql`) replaces the data. Dumps are held in memory.
-- Storage credentials come from a profile (`aws` for S3, `azure`, `gcp`) or the environment.
+- Storage credentials come from a profile (`aws` for S3, `azure`, `gcp`) or the environment. An
+  `aws` profile can hold keys itself or name a profile in `~/.aws/credentials` with
+  `--set aws_profile=<name>` (static keys only; SSO and assume-role profiles are not supported).
 - `backup schedule` prints a crontab line; ikit never edits your crontab.
 
 ### Digest pinning
