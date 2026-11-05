@@ -132,6 +132,8 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
 
 ### Remote state
 
+Setting up, joining, offboarding and recovering a shared org: [docs/team.md](docs/team.md).
+
 - `org remote set` makes an org shared: its `state.db`, `config.yaml` and MCP files go to
   `<storage prefix>/state/<org>/` as numbered snapshots (`snapshots/000042.tar.zst`), with
   `HEAD.json` naming the current one. The local org folder becomes a cache of HEAD.
