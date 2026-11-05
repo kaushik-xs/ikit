@@ -418,7 +418,8 @@ async fn secrets(ctx: &Ctx, cmd: SecretsCmd) -> anyhow::Result<()> {
                 ));
             }
             println!(
-                "Keychain copies are kept; remove them with `ikit org secrets forget-keychain` once                  a second machine has read the file."
+                "Keychain copies are kept; remove them with `ikit org secrets forget-keychain` once \
+                 a second machine has read the file."
             );
         }
         SecretsCmd::List => {
@@ -428,7 +429,8 @@ async fn secrets(ctx: &Ctx, cmd: SecretsCmd) -> anyhow::Result<()> {
             }
             if info.store == "keychain" {
                 println!(
-                    "Org `{org}` keeps its secrets in this machine's keychain (not shared). Move                      them into an encrypted file with `ikit org secrets init`."
+                    "Org `{org}` keeps its secrets in this machine's keychain (not shared). Move \
+                     them into an encrypted file with `ikit org secrets init`."
                 );
                 return Ok(());
             }
@@ -459,7 +461,8 @@ async fn secrets(ctx: &Ctx, cmd: SecretsCmd) -> anyhow::Result<()> {
         }
         SecretsCmd::Revoke { key_or_label, yes } => {
             let question = format!(
-                "Revoke `{key_or_label}` from org `{org}`'s secrets? It may have kept a copy, so                  rotate what it could read."
+                "Revoke `{key_or_label}` from org `{org}`'s secrets? It may have kept a copy, so \
+                 rotate what it could read."
             );
             if ctx.confirm(&question, yes)? {
                 let removed =
