@@ -52,12 +52,9 @@ fn is_synced_dir_file(name: &str) -> bool {
     let Some((dir, file)) = name.split_once('/') else {
         return false;
     };
-    SYNCED_DIRS.iter().any(|(d, ext)| {
-        *d == dir
-            && file
-                .strip_suffix(ext)
-                .is_some_and(ikit_core::is_slug)
-    })
+    SYNCED_DIRS
+        .iter()
+        .any(|(d, ext)| *d == dir && file.strip_suffix(ext).is_some_and(ikit_core::is_slug))
 }
 
 /// The synced folders' files present locally, as `dir/file`, sorted.
@@ -636,9 +633,7 @@ fn extract_bundle(org: &OrgPaths, compressed: &[u8]) -> Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.to_string_lossy().into_owned();
-        if name != STATE_DB
-            && !SYNCED_FILES.contains(&name.as_str())
-            && !is_synced_dir_file(&name)
+        if name != STATE_DB && !SYNCED_FILES.contains(&name.as_str()) && !is_synced_dir_file(&name)
         {
             return Err(AppError::Invalid(format!(
                 "remote snapshot holds an unexpected file `{name}`; nothing was changed"
@@ -1261,7 +1256,9 @@ pub async fn org_unlock(paths: &Paths, org: &str) -> Result<Option<LockInfo>> {
 }
 
 pub async fn org_history(paths: &Paths, org: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
-    Remote::open(&require_spec(paths, org)?)?.history(limit).await
+    Remote::open(&require_spec(paths, org)?)?
+        .history(limit)
+        .await
 }
 
 /// Replaces the local copy with generation `generation`'s snapshot; run inside a write

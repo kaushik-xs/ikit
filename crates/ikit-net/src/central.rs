@@ -199,7 +199,11 @@ impl Central {
             401 => format!(
                 "{} (the zerotier profile's api_token must be a New Central service account \
                  API key)",
-                if message.is_empty() { "unauthorized" } else { &message }
+                if message.is_empty() {
+                    "unauthorized"
+                } else {
+                    &message
+                }
             ),
             403 if message.is_empty() => {
                 "the service account has no access to this (add it to the network's or \

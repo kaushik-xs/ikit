@@ -309,10 +309,18 @@ async fn remote_set_clone_pull_and_status_over_a_folder() {
     .await
     .unwrap();
     let (spec, head, secrets) = app
-        .remote_set("nas", RemoteOverrides::default(), &test_identity().0, "org remote set")
+        .remote_set(
+            "nas",
+            RemoteOverrides::default(),
+            &test_identity().0,
+            "org remote set",
+        )
         .await
         .unwrap();
-    assert!(secrets.is_some(), "keychain secrets moved to the encrypted file");
+    assert!(
+        secrets.is_some(),
+        "keychain secrets moved to the encrypted file"
+    );
     drop(app);
     assert_eq!(spec.prefix, "ikit/state/acme");
     assert_eq!(head.generation, 1);
@@ -327,7 +335,10 @@ async fn remote_set_clone_pull_and_status_over_a_folder() {
     assert_eq!(name, "acme");
     assert_eq!(storages(&bob).await, ["nas"]);
     for f in ["recipients/org.txt", "secrets/org.age"] {
-        assert!(bob.org("acme").dir.join(f).exists(), "{f} travels with the state");
+        assert!(
+            bob.org("acme").dir.join(f).exists(),
+            "{f} travels with the state"
+        );
     }
     assert!(
         org_clone(&bob, RemoteSpec::parse_url(&url).unwrap())
@@ -437,13 +448,19 @@ async fn restore_brings_back_an_old_generation_as_a_new_one() {
     let s = Session::begin_with(remote.clone(), paths.org("acme"), true, &opts("restore 2"))
         .await
         .unwrap();
-    restore_into(&remote, &paths.org("acme"), 2, false).await.unwrap();
+    restore_into(&remote, &paths.org("acme"), 2, false)
+        .await
+        .unwrap();
     assert_eq!(
         s.finish().await.unwrap(),
         SyncOutcome::Pushed { generation: 4 }
     );
     assert_eq!(storages(&paths).await, ["a"]);
-    assert!(restore_into(&remote, &paths.org("acme"), 99, false).await.is_err());
+    assert!(
+        restore_into(&remote, &paths.org("acme"), 99, false)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -465,9 +482,15 @@ async fn restore_keeps_the_current_secrets_unless_asked() {
     s.finish().await.unwrap();
 
     restore_into(&remote, &org, 2, false).await.unwrap();
-    assert_eq!(std::fs::read_to_string(&recipients).unwrap(), "age1new # new\n");
+    assert_eq!(
+        std::fs::read_to_string(&recipients).unwrap(),
+        "age1new # new\n"
+    );
     restore_into(&remote, &org, 2, true).await.unwrap();
-    assert_eq!(std::fs::read_to_string(&recipients).unwrap(), "age1old # old\n");
+    assert_eq!(
+        std::fs::read_to_string(&recipients).unwrap(),
+        "age1old # old\n"
+    );
 }
 
 #[tokio::test]
@@ -500,7 +523,13 @@ async fn prune_keeps_head_recent_and_newest_generations() {
     // With a cutoff in the future only the newest two generations stay.
     let future = Utc::now() + chrono::Duration::days(1);
     assert_eq!(remote.prune(&head, 2, future).await.unwrap(), 3);
-    let gens: Vec<u64> = remote.history(10).await.unwrap().iter().map(|h| h.generation).collect();
+    let gens: Vec<u64> = remote
+        .history(10)
+        .await
+        .unwrap()
+        .iter()
+        .map(|h| h.generation)
+        .collect();
     assert_eq!(gens, [5, 4]);
 }
 
@@ -534,8 +563,14 @@ async fn pulling_reports_who_gained_or_lost_access_to_secrets() {
         .await
         .unwrap();
     let notices = s.notices().join("\n");
-    assert!(notices.contains("bob (") && notices.contains("can now read org"), "{notices}");
-    assert!(notices.contains("alice (") && notices.contains("can no longer read"), "{notices}");
+    assert!(
+        notices.contains("bob (") && notices.contains("can now read org"),
+        "{notices}"
+    );
+    assert!(
+        notices.contains("alice (") && notices.contains("can no longer read"),
+        "{notices}"
+    );
     s.finish().await.unwrap();
 }
 

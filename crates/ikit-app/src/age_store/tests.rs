@@ -43,7 +43,10 @@ fn round_trips_and_persists() {
     assert_eq!(again.keys().unwrap(), ["org/acme/y"]);
 
     let raw = std::fs::read(secrets_file(&org(&dir))).unwrap();
-    assert!(!String::from_utf8_lossy(&raw).contains("org/acme/y"), "encrypted");
+    assert!(
+        !String::from_utf8_lossy(&raw).contains("org/acme/y"),
+        "encrypted"
+    );
 }
 
 #[test]
@@ -59,7 +62,12 @@ fn only_recipients_read_and_write() {
     let e = as_bob.get("k").unwrap_err().to_string();
     assert!(e.contains("cannot read") && e.contains(&bob.public), "{e}");
     let none = AgeFileStore::new(org(&dir), None);
-    assert!(none.get("k").unwrap_err().to_string().contains("ikit identity create"));
+    assert!(
+        none.get("k")
+            .unwrap_err()
+            .to_string()
+            .contains("ikit identity create")
+    );
 
     let as_alice = AgeFileStore::new(org(&dir), Some(alice.clone()));
     assert!(as_alice.grant("org", b.clone()).unwrap());
@@ -146,7 +154,11 @@ fn identities_load_from_a_key_file() {
     let dir = tempfile::tempdir().unwrap();
     let (secret, id) = LocalIdentity::generate();
     let path = dir.path().join("key.txt");
-    std::fs::write(&path, format!("# created: now\n# public key: x\n{}\n", *secret)).unwrap();
+    std::fs::write(
+        &path,
+        format!("# created: now\n# public key: x\n{}\n", *secret),
+    )
+    .unwrap();
     assert_eq!(LocalIdentity::from_file(&path).unwrap().public, id.public);
     assert!(LocalIdentity::from_secret("AGE-SECRET-KEY-nope").is_err());
 }
@@ -213,7 +225,10 @@ fn split_gives_an_env_its_own_readers() {
 
     let moved = as_alice.split("prod", std::slice::from_ref(&a)).unwrap();
     assert_eq!(moved, [HOOK, PROD]);
-    assert!(as_alice.split("prod", std::slice::from_ref(&a)).is_err(), "once");
+    assert!(
+        as_alice.split("prod", std::slice::from_ref(&a)).is_err(),
+        "once"
+    );
     assert!(as_alice.split("org", std::slice::from_ref(&a)).is_err());
 
     // Bob reads dev and org secrets but not prod's.
@@ -222,11 +237,17 @@ fn split_gives_an_env_its_own_readers() {
     assert_eq!(as_bob.get(PROFILE).unwrap().as_deref(), Some("z"));
     let e = as_bob.get(PROD).unwrap_err().to_string();
     assert!(e.contains("prod.age") && e.contains("--env prod"), "{e}");
-    assert!(as_bob.set("org/acme/workload/wl-acme-prod-002/x", "v").is_err());
+    assert!(
+        as_bob
+            .set("org/acme/workload/wl-acme-prod-002/x", "v")
+            .is_err()
+    );
 
     // New prod secrets land in the prod file.
     let fresh = AgeFileStore::new(org(&dir), Some(alice.clone()));
-    fresh.set("org/acme/workload/wl-acme-prod-002/x", "v").unwrap();
+    fresh
+        .set("org/acme/workload/wl-acme-prod-002/x", "v")
+        .unwrap();
     let scopes = fresh.scopes().unwrap();
     assert_eq!(scopes[0].scope, "org");
     assert_eq!(scopes[0].secrets, Some(2));
@@ -252,8 +273,14 @@ fn only_org_readers_may_split_and_the_splitter_must_keep_access() {
     let as_bob = AgeFileStore::new(org(&dir), Some(bob));
     assert!(as_bob.split("prod", std::slice::from_ref(&b)).is_err());
     let as_alice = AgeFileStore::new(org(&dir), Some(alice));
-    assert!(as_alice.split("prod", &[b]).is_err(), "alice left herself out");
-    assert!(!recipients_path(&org(&dir), "prod").exists(), "nothing written");
+    assert!(
+        as_alice.split("prod", &[b]).is_err(),
+        "alice left herself out"
+    );
+    assert!(
+        !recipients_path(&org(&dir), "prod").exists(),
+        "nothing written"
+    );
 }
 
 #[test]

@@ -86,7 +86,10 @@ impl RecipientEntry {
     /// Parses `age1… # label` or `ssh-ed25519 AAAA… [comment] [# label]`.
     pub fn parse(line: &str) -> Result<Self, SecretError> {
         let (key_part, label) = match line.split_once('#') {
-            Some((k, l)) => (k.trim(), Some(l.trim().to_owned()).filter(|l| !l.is_empty())),
+            Some((k, l)) => (
+                k.trim(),
+                Some(l.trim().to_owned()).filter(|l| !l.is_empty()),
+            ),
             None => (line.trim(), None),
         };
         let mut words = key_part.split_whitespace();
@@ -137,7 +140,9 @@ pub fn read_recipients(path: &Path) -> Result<Vec<RecipientEntry>, SecretError> 
 }
 
 fn write_recipients(path: &Path, entries: &[RecipientEntry]) -> Result<(), SecretError> {
-    let mut text = String::from("# Public keys that can read secrets/org.age (ikit org secrets grant|revoke)\n");
+    let mut text = String::from(
+        "# Public keys that can read secrets/org.age (ikit org secrets grant|revoke)\n",
+    );
     for e in entries {
         text.push_str(&e.line());
         text.push('\n');
@@ -211,7 +216,11 @@ fn short_key(key: &str) -> String {
     } else {
         body.to_owned()
     };
-    if kind.is_empty() { short } else { format!("{kind} {short}") }
+    if kind.is_empty() {
+        short
+    } else {
+        format!("{kind} {short}")
+    }
 }
 
 /// This machine's private key and the public key it pairs with.
@@ -268,11 +277,9 @@ impl LocalIdentity {
         {
             return Self::from_secret(line);
         }
-        let parsed = age::ssh::Identity::from_buffer(
-            text.as_bytes(),
-            Some(path.display().to_string()),
-        )
-        .map_err(|e| err(format!("{}: {e}", path.display())))?;
+        let parsed =
+            age::ssh::Identity::from_buffer(text.as_bytes(), Some(path.display().to_string()))
+                .map_err(|e| err(format!("{}: {e}", path.display())))?;
         match parsed {
             age::ssh::Identity::Unencrypted(_) => {}
             age::ssh::Identity::Encrypted(_) => {
@@ -283,7 +290,10 @@ impl LocalIdentity {
                 )));
             }
             age::ssh::Identity::Unsupported(k) => {
-                return Err(err(format!("{}: unsupported SSH key: {k:?}", path.display())));
+                return Err(err(format!(
+                    "{}: unsupported SSH key: {k:?}",
+                    path.display()
+                )));
             }
         }
         let pub_path = PathBuf::from(format!("{}.pub", path.display()));
@@ -436,7 +446,9 @@ impl AgeFileStore {
         let decryptor = age::Decryptor::new(bytes.as_slice())
             .map_err(|e| err(format!("{}: {e}", path.display())))?;
         let mut reader = decryptor
-            .decrypt(std::iter::once(identity.identity.as_ref() as &dyn age::Identity))
+            .decrypt(std::iter::once(
+                identity.identity.as_ref() as &dyn age::Identity
+            ))
             .map_err(|e| match e {
                 age::DecryptError::NoMatchingKeys => err(format!(
                     "your key {} cannot read {}; ask a teammate to run \
@@ -585,7 +597,11 @@ impl AgeFileStore {
 
     /// Gives environment `env` its own secrets file readable by `recipients`, moving its
     /// workloads' and hooks' secrets out of the org file. Returns the keys moved.
-    pub fn split(&self, env: &str, recipients: &[RecipientEntry]) -> Result<Vec<String>, SecretError> {
+    pub fn split(
+        &self,
+        env: &str,
+        recipients: &[RecipientEntry],
+    ) -> Result<Vec<String>, SecretError> {
         if env == ORG_SCOPE || !ikit_core::is_slug(env) {
             return Err(err(format!("`{env}` cannot name a secrets file")));
         }
@@ -631,7 +647,10 @@ impl AgeFileStore {
         let keys: Vec<String> = moved.keys().cloned().collect();
         org.extend(moved);
         self.encrypt(ORG_SCOPE, &org, &org_recipients, &org_recipients)?;
-        for path in [secrets_path(&self.org, env), recipients_path(&self.org, env)] {
+        for path in [
+            secrets_path(&self.org, env),
+            recipients_path(&self.org, env),
+        ] {
             if path.exists() {
                 std::fs::remove_file(&path)
                     .map_err(|e| err(format!("removing {}: {e}", path.display())))?;

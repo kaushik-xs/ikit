@@ -175,7 +175,9 @@ pub fn secrets_info(paths: &Paths, org: &str, identity: &IdentityOptions) -> Res
 
 /// A recipient whose label starts with `recovery` is the offline break-glass key.
 fn is_recovery(r: &RecipientEntry) -> bool {
-    r.label.as_deref().is_some_and(|l| l.starts_with("recovery"))
+    r.label
+        .as_deref()
+        .is_some_and(|l| l.starts_with("recovery"))
 }
 
 /// A recipient whose label starts with `ci` is an automation key, not a person.

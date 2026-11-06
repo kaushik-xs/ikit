@@ -200,8 +200,14 @@ mod tests {
     fn snapshot_keys_sort_by_generation() {
         assert_eq!(Head::snapshot_key(42, "ab"), "snapshots/000042-ab.tar.zst");
         assert!(Head::snapshot_key(9, "ff") < Head::snapshot_key(10, "00"));
-        assert_eq!(Head::snapshot_generation("x/snapshots/000042-ab.tar.zst"), Some(42));
-        assert_eq!(Head::snapshot_generation("snapshots/000007.tar.zst"), Some(7));
+        assert_eq!(
+            Head::snapshot_generation("x/snapshots/000042-ab.tar.zst"),
+            Some(42)
+        );
+        assert_eq!(
+            Head::snapshot_generation("snapshots/000007.tar.zst"),
+            Some(7)
+        );
         assert_eq!(Head::snapshot_generation("snapshots/notes.txt"), None);
         assert_eq!(Head::snapshot_generation("snapshots/42.tar.zst"), None);
         assert_eq!(Head::history_key(3), "history/000003.json");
