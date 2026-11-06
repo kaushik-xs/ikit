@@ -1,8 +1,8 @@
 # Service resources (design)
 
-Status: phase 1 implemented (November 2026): S3 buckets and SQS queues through the `aws`
-provider, which also covers S3- and SQS-compatible servers at an `endpoint`. Phases 2 and 3 are
-still proposals. Where phase 1 differs from the first draft of this design:
+Status: phases 1 and 1.5 implemented (November 2026): S3 buckets and SQS queues through the
+`aws` provider, which also covers S3- and SQS-compatible servers at an `endpoint`, and
+per-service IAM users on AWS. Phases 2 and 3 are still proposals. Where phase 1 differs from the first draft of this design:
 
 - The registry key is `needs`, not `resources`: a version's `resources` already holds CPU and
   memory limits.
@@ -246,11 +246,17 @@ In-workload drivers return their work as an init service for the renderer instea
   profile, or a named `~/.aws` profile). The `access_key_id` and `secret_access_key` fields
   resolve to them. Simple, but every service on the backend gets the same keys, and they are
   usually the keys ikit provisions with, which can do far more than any service should.
-- **Phase 1.5** (next): per-service credentials on AWS, below.
+- **Phase 1.5** (done): per-service credentials on AWS, below.
 - **Later**: the same for self-hosted backends (RustFS and MinIO users and policies). ElasticMQ
   has no authentication, so services there keep the backend's keys.
 
 ### Per-service credentials (phase 1.5)
+
+As built, with these differences from the text below: an identity is per service and
+provisioning *profile* (the account ID is recorded once known, since it isn't known at `plan`);
+a removed service's user is deleted by `ikit res keys rm <service>`, or by `res rm` of its last
+own resource; and `res backend test` shows the provisioning identity but doesn't read the
+boundary policy, which the provisioning policy doesn't allow.
 
 On a backend with per-service keys, ikit creates an IAM user for each service that has resources
 on it, allows that user exactly those resources, creates its access key and keeps the key in the
@@ -365,7 +371,7 @@ existing RDS instance named by the backend (creating RDS instances themselves is
   backends and bindings, `plan`/`apply`/`wl rm` handling, a new `ikit res` command
   (`list|show|adopt|rm|bind|backend`), S3 buckets (with versioning) and SQS queues (with DLQ)
   on AWS or a compatible server, tags, phase-1 credentials.
-- **Phase 1.5, per-service credentials on AWS** (next). IAM users under `/ikit/<org>/` with a
+- **Phase 1.5, per-service credentials on AWS** (done). IAM users under `/ikit/<org>/` with a
   required permissions boundary, one inline policy per service, keys in the org's secret store,
   `res rotate`, `res keys`, `res backend set|iam-policy|test`.
 - **Phase 2, self-hosted.** In-workload backends with init services: RustFS (or MinIO) for `s3`,

@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id AS \"id!\", w.name AS workload, i.service, i.profile, i.account,\n                      i.user_name, i.user_arn, i.access_key_id, i.retiring_key_id,\n                      i.covers_json AS \"covers_json: Json<Vec<String>>\",\n                      i.status, i.orphaned,\n                      i.created_at AS \"created_at: DateTime<Utc>\",\n                      i.rotated_at AS \"rotated_at: DateTime<Utc>\"\n               FROM service_identities i\n               JOIN workloads w ON w.id = i.workload_id\n               WHERE ?1 IS NULL OR i.workload_id = ?1\n               ORDER BY w.name, i.service, i.profile",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "workload",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "service",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "account",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_name",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_arn",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "access_key_id",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "retiring_key_id",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "covers_json: Json<Vec<String>>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "orphaned",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "rotated_at: DateTime<Utc>",
+        "ordinal": 13,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d04c309717e243c60dfdba66b51f6956506740e255baa2f82817bb0bb8c16115"
+}

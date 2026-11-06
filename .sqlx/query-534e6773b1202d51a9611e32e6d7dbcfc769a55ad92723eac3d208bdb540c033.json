@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO service_identities\n                   (workload_id, service, profile, user_name, status, created_at)\n               VALUES (?, ?, ?, ?, 'pending', ?)\n               RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "534e6773b1202d51a9611e32e6d7dbcfc769a55ad92723eac3d208bdb540c033"
+}

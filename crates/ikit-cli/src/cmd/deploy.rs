@@ -238,6 +238,31 @@ fn print_plan(p: &DeployPlan) {
             r.external_id, r.api, r.resource
         );
     }
+    for i in &p.identities {
+        let n = i.covers.len();
+        let what = format!("{n} resource{}", if n == 1 { "" } else { "s" });
+        match i.action {
+            ikit_app::IdentityAction::Create => {
+                println!(
+                    "  + iam user {}  (key for {}, {what})",
+                    i.user_name, i.service
+                )
+            }
+            ikit_app::IdentityAction::UpdatePolicy => {
+                println!(
+                    "  ~ iam policy {}  ({what}: {})",
+                    i.user_name,
+                    i.covers.join(", ")
+                )
+            }
+            ikit_app::IdentityAction::RetireKey => {
+                println!(
+                    "  - old key of {}  (after {} runs with its new one)",
+                    i.user_name, i.service
+                )
+            }
+        }
+    }
     if p.plan.is_empty() {
         if p.status != ikit_core::WorkloadStatus::Applied {
             println!(
@@ -276,6 +301,9 @@ fn print_plan(p: &DeployPlan) {
         for w in &e.warnings {
             warn(w);
         }
+    }
+    for w in &p.warnings {
+        warn(w);
     }
     for b in &p.blockers {
         warn(format!("apply is blocked: {b}"));

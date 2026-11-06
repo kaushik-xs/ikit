@@ -142,25 +142,37 @@ impl App {
                 detail.workload.status
             )));
         }
-        let created = self.created_resources(&detail.workload).await?;
+        let mut created: Vec<String> = self
+            .created_resources(&detail.workload)
+            .await?
+            .iter()
+            .map(|r| format!("{} ({})", r.address(), r.external_id))
+            .collect();
+        created.extend(
+            self.created_identities(&detail.workload)
+                .await?
+                .iter()
+                .map(|i| format!("IAM user {}", i.user_name)),
+        );
         match resources {
             ResourcePolicy::Refuse if !created.is_empty() => {
                 return Err(AppError::InUse {
                     what: name.to_owned(),
                     by: vec![format!(
                         "resources ikit created: {} (pass --delete-resources to delete them, or --keep-resources to leave them)",
-                        created
-                            .iter()
-                            .map(|r| format!("{} ({})", r.address(), r.external_id))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        created.join(", ")
                     )],
                 });
             }
             ResourcePolicy::Refuse | ResourcePolicy::Keep => {
+                self.forget_identities(&detail.workload, true).await?;
                 self.forget_resources(&detail.workload, true).await?;
             }
-            ResourcePolicy::Delete => self.forget_resources(&detail.workload, false).await?,
+            ResourcePolicy::Delete => {
+                // Users first: their policies name the resources.
+                self.forget_identities(&detail.workload, false).await?;
+                self.forget_resources(&detail.workload, false).await?;
+            }
         }
         for key in self.hook_secret_keys(name).await? {
             self.secrets.delete(&key)?;
@@ -185,6 +197,7 @@ impl App {
     pub(crate) async fn write_spec(&self, name: &str) -> Result<()> {
         let detail = self.workload_show(name).await?;
         self.sync_resources(&detail.workload).await?;
+        self.sync_identities(&detail.workload).await?;
         let mut resources: BTreeMap<String, BTreeMap<String, SpecResource>> = BTreeMap::new();
         for info in self.resources_list(Some(name)).await? {
             let r = &info.resource;

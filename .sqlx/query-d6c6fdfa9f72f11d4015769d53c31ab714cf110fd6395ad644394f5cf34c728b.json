@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE service_identities\n               SET account = ?, user_arn = ?, access_key_id = ?, retiring_key_id = ?,\n                   covers_json = ?, status = ?, orphaned = ?, rotated_at = ?\n               WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "d6c6fdfa9f72f11d4015769d53c31ab714cf110fd6395ad644394f5cf34c728b"
+}

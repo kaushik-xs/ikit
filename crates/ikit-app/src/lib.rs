@@ -73,7 +73,8 @@ pub use remote::{
     org_status, org_unlock, remote_rm, remote_spec,
 };
 pub use resources::{
-    NewBackendRequest, PENDING_VALUE, ResourceInfo, ResourcePlan, UNBOUND_VALUE, parse_address,
+    BackendChanges, IdentityAction, IdentityPlan, IdentityPolicies, NewBackendRequest,
+    PENDING_VALUE, ResourceInfo, ResourcePlan, UNBOUND_VALUE, parse_address,
 };
 pub use routes::{RouteList, RouteRequest};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore};

@@ -23,11 +23,22 @@ use serde::Serialize;
 use crate::{App, AppError, Result};
 
 mod aws;
+pub(crate) mod iam;
+mod identities;
+
+pub use identities::{IdentityAction, IdentityPlan, IdentityPolicies};
 
 /// Shown in place of a value that exists only once `ikit apply` has created the resource.
 pub const PENDING_VALUE: &str = "<created by ikit apply>";
 /// Shown in place of values of a resource whose backend isn't known yet.
 pub const UNBOUND_VALUE: &str = "<no backend: see ikit res bind>";
+
+/// Changes to a backend. `None` leaves a setting alone; `boundary: Some(None)` clears it.
+#[derive(Debug, Clone, Default)]
+pub struct BackendChanges {
+    pub per_service_keys: Option<bool>,
+    pub boundary: Option<Option<String>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct NewBackendRequest {
@@ -99,6 +110,53 @@ pub(crate) trait ResourceDriver: Send + Sync {
         name: &str,
         outputs: &BTreeMap<String, String>,
     ) -> Result<()>;
+
+    // IAM, for per-service keys. Drivers without it refuse.
+
+    /// The provisioning identity: its account ID and ARN.
+    async fn whoami(&self) -> Result<(String, String)> {
+        Err(no_iam())
+    }
+    /// Creates the user (or checks the existing one carries `boundary`); returns its ARN.
+    async fn ensure_user(&self, _user: &IamUser<'_>) -> Result<String> {
+        Err(no_iam())
+    }
+    async fn put_user_policy(&self, _user: &str, _name: &str, _document: &str) -> Result<()> {
+        Err(no_iam())
+    }
+    /// IDs of the user's access keys.
+    async fn access_keys(&self, _user: &str) -> Result<Vec<String>> {
+        Err(no_iam())
+    }
+    async fn create_access_key(&self, _user: &str) -> Result<Keys> {
+        Err(no_iam())
+    }
+    async fn delete_access_key(&self, _user: &str, _id: &str) -> Result<()> {
+        Err(no_iam())
+    }
+    /// Deletes the user with its keys and inline policies; nothing if it's gone already.
+    async fn delete_user(&self, _user: &str) -> Result<()> {
+        Err(no_iam())
+    }
+    /// Waits until a new key is accepted (IAM is eventually consistent).
+    async fn wait_for_key(&self, _keys: &Keys) -> Result<()> {
+        Err(no_iam())
+    }
+}
+
+fn no_iam() -> AppError {
+    AppError::Invalid(
+        "this backend can't create IAM users; per-service keys need AWS itself".to_owned(),
+    )
+}
+
+/// An IAM user to create for a service.
+#[derive(Debug, Clone)]
+pub(crate) struct IamUser<'a> {
+    pub name: &'a str,
+    pub path: &'a str,
+    pub boundary: &'a str,
+    pub tags: &'a BTreeMap<String, String>,
 }
 
 /// How to reach a backend: region, endpoint and the credentials services get too.
@@ -185,6 +243,13 @@ impl App {
                 "endpoint `{endpoint}` must start with http:// or https://"
             )));
         }
+        if req.options.per_service_keys {
+            identities::check_per_service(
+                &req.name,
+                req.options.endpoint.as_deref(),
+                req.options.boundary.as_deref(),
+            )?;
+        }
         if let Some(profile) = &req.profile {
             self.profile_show(ProfileKind::Aws, profile).await?;
         }
@@ -205,6 +270,34 @@ impl App {
                 }
                 e => e,
             })
+    }
+
+    /// Turns per-service keys on or off, or changes the boundary. Takes effect on the next apply
+    /// of each workload using the backend.
+    pub async fn resource_backend_set(
+        &self,
+        name: &str,
+        changes: BackendChanges,
+    ) -> Result<Backend> {
+        let mut b = self.resource_backend_show(name).await?;
+        if let Some(on) = changes.per_service_keys {
+            b.options.per_service_keys = on;
+        }
+        if let Some(boundary) = changes.boundary {
+            b.options.boundary = boundary;
+        }
+        if b.options.per_service_keys {
+            identities::check_per_service(
+                name,
+                b.options.endpoint.as_deref(),
+                b.options.boundary.as_deref(),
+            )?;
+        }
+        self.store
+            .resources()
+            .set_backend_options(name, &b.options)
+            .await?;
+        Ok(b)
     }
 
     pub async fn resource_backend_list(&self) -> Result<Vec<Backend>> {
@@ -499,6 +592,10 @@ impl App {
             });
         }
         let deleted = self.forget_resource(&r, keep).await?;
+        // The service's last resource gone: its IAM user has nothing left to reach.
+        let wl = self.workload_get(workload).await?;
+        self.forget_service_identities(&wl, &r.service, keep)
+            .await?;
         self.write_spec(workload).await?;
         Ok(deleted)
     }
@@ -647,6 +744,8 @@ impl App {
         let specs = self.specs_for(&services).await?;
         let mut access: BTreeMap<String, Access> = BTreeMap::new();
         let mut own: BTreeMap<(String, String), ResourceValues> = BTreeMap::new();
+        // Resources on backends with per-service keys, by owner: the provisioning profile.
+        let mut per_service: BTreeMap<(String, String), String> = BTreeMap::new();
         for r in rows.iter().filter(|r| !r.orphaned) {
             let backend = match &r.backend {
                 Some(b) => Some(b.clone()),
@@ -655,9 +754,15 @@ impl App {
             let mut fields = BTreeMap::from([("name".to_owned(), r.external_id.clone())]);
             match backend {
                 Some(b) => {
+                    let backend = self.resource_backend_show(&b).await?;
                     if !access.contains_key(&b) {
-                        let backend = self.resource_backend_show(&b).await?;
                         access.insert(b.clone(), self.backend_access(&backend).await?);
+                    }
+                    if backend.options.per_service_keys {
+                        per_service.insert(
+                            (r.service.clone(), r.name.clone()),
+                            backend.profile.clone().unwrap_or_default(),
+                        );
                     }
                     let a = &access[&b];
                     fields.insert("region".to_owned(), a.region.clone());
@@ -690,7 +795,7 @@ impl App {
         }
         let mut out: BTreeMap<String, BTreeMap<String, ResourceValues>> = BTreeMap::new();
         for (service, _, _, spec) in &specs {
-            let mine = out.entry(service.clone()).or_default();
+            let mut mine = BTreeMap::new();
             for need in &spec.needs {
                 let key = match need.used() {
                     None => (service.clone(), need.name.clone()),
@@ -706,7 +811,18 @@ impl App {
                 };
                 match own.get(&key) {
                     Some(v) => {
-                        mine.insert(need.name.clone(), v.clone());
+                        let mut v = v.clone();
+                        // This service's own key, not the backend's.
+                        if let Some(profile) = per_service.get(&key) {
+                            let keys = self.identity_key_for(wl, service, profile).await?;
+                            let (id, secret) = match keys {
+                                Some(k) => (k.access_key_id, k.secret_access_key),
+                                None => (PENDING_VALUE.to_owned(), PENDING_VALUE.to_owned()),
+                            };
+                            v.fields.insert("access_key_id".to_owned(), id);
+                            v.fields.insert("secret_access_key".to_owned(), secret);
+                        }
+                        mine.insert(need.name.clone(), v);
                     }
                     None if need.uses.is_some() => {
                         return Err(AppError::Invalid(format!(
@@ -718,6 +834,7 @@ impl App {
                     None => {}
                 }
             }
+            out.insert(service.clone(), mine);
         }
         Ok(out)
     }
@@ -785,12 +902,24 @@ pub(crate) mod tests {
     /// Resources by name: their API and outputs (plus `tag <key>` entries).
     pub type Items = BTreeMap<String, (ResourceApi, BTreeMap<String, String>)>;
 
-    /// A backend that keeps buckets and queues in memory.
+    /// An IAM user in [`FakeDriver`].
+    #[derive(Debug, Clone, Default)]
+    pub struct FakeUser {
+        pub path: String,
+        pub boundary: String,
+        pub policy: String,
+        /// (key ID, secret)
+        pub keys: Vec<(String, String)>,
+    }
+
+    /// A backend that keeps buckets, queues and IAM users in memory.
     #[derive(Default)]
     pub struct FakeDriver {
         pub items: Mutex<Items>,
         /// Names `ensure` fails on.
         pub fail: Mutex<BTreeSet<String>>,
+        pub users: Mutex<BTreeMap<String, FakeUser>>,
+        next_key: Mutex<u32>,
     }
 
     #[async_trait]
@@ -847,6 +976,78 @@ pub(crate) mod tests {
             _outputs: &BTreeMap<String, String>,
         ) -> Result<()> {
             self.items.lock().unwrap().remove(name);
+            Ok(())
+        }
+
+        async fn whoami(&self) -> Result<(String, String)> {
+            Ok((
+                "123456789012".into(),
+                "arn:aws:iam::123456789012:user/tofu".into(),
+            ))
+        }
+
+        async fn ensure_user(&self, user: &IamUser<'_>) -> Result<String> {
+            let mut users = self.users.lock().unwrap();
+            let u = users
+                .entry(user.name.to_owned())
+                .or_insert_with(|| FakeUser {
+                    path: user.path.to_owned(),
+                    boundary: user.boundary.to_owned(),
+                    ..Default::default()
+                });
+            if u.boundary != user.boundary {
+                return Err(AppError::Invalid("boundary differs".into()));
+            }
+            Ok(format!(
+                "arn:aws:iam::123456789012:user{}{}",
+                user.path, user.name
+            ))
+        }
+
+        async fn put_user_policy(&self, user: &str, _name: &str, document: &str) -> Result<()> {
+            self.users.lock().unwrap().get_mut(user).unwrap().policy = document.to_owned();
+            Ok(())
+        }
+
+        async fn access_keys(&self, user: &str) -> Result<Vec<String>> {
+            Ok(self.users.lock().unwrap()[user]
+                .keys
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect())
+        }
+
+        async fn create_access_key(&self, user: &str) -> Result<Keys> {
+            let mut users = self.users.lock().unwrap();
+            let u = users.get_mut(user).unwrap();
+            if u.keys.len() >= 2 {
+                return Err(AppError::Invalid("LimitExceeded: two keys already".into()));
+            }
+            let mut n = self.next_key.lock().unwrap();
+            *n += 1;
+            let keys = Keys {
+                access_key_id: format!("AKIAFAKE{n}"),
+                secret_access_key: format!("secret{n}"),
+                session_token: None,
+            };
+            u.keys
+                .push((keys.access_key_id.clone(), keys.secret_access_key.clone()));
+            Ok(keys)
+        }
+
+        async fn delete_access_key(&self, user: &str, id: &str) -> Result<()> {
+            if let Some(u) = self.users.lock().unwrap().get_mut(user) {
+                u.keys.retain(|(k, _)| k != id);
+            }
+            Ok(())
+        }
+
+        async fn delete_user(&self, user: &str) -> Result<()> {
+            self.users.lock().unwrap().remove(user);
+            Ok(())
+        }
+
+        async fn wait_for_key(&self, _keys: &Keys) -> Result<()> {
             Ok(())
         }
     }

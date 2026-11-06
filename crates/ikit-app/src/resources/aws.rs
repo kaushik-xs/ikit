@@ -12,17 +12,23 @@ use aws_sdk_s3::types::{
 use aws_sdk_sqs::types::QueueAttributeName;
 use ikit_core::ResourceApi;
 
-use super::{Access, ResourceDriver, Want};
+use super::{Access, IamUser, Keys, ResourceDriver, Want};
 use crate::{AppError, Result};
 
 /// The longest SQS keeps messages, used for dead-letter queues so failures can be looked at.
 const DLQ_RETENTION: &str = "1209600";
 
+/// How long a new access key gets to start working; IAM changes take seconds to spread.
+const KEY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(super) struct AwsDriver {
     backend: String,
     region: String,
+    conf: aws_config::SdkConfig,
     s3: aws_sdk_s3::Client,
     sqs: aws_sdk_sqs::Client,
+    iam: aws_sdk_iam::Client,
+    sts: aws_sdk_sts::Client,
 }
 
 impl AwsDriver {
@@ -51,6 +57,9 @@ impl AwsDriver {
             region: access.region.clone(),
             s3: aws_sdk_s3::Client::from_conf(s3.build()),
             sqs: aws_sdk_sqs::Client::from_conf(sqs.build()),
+            iam: aws_sdk_iam::Client::new(&conf),
+            sts: aws_sdk_sts::Client::new(&conf),
+            conf,
         }
     }
 
@@ -341,5 +350,190 @@ impl ResourceDriver for AwsDriver {
             }
         }
         Ok(())
+    }
+
+    async fn whoami(&self) -> Result<(String, String)> {
+        let out = self
+            .sts
+            .get_caller_identity()
+            .send()
+            .await
+            .map_err(|e| self.error("looking up the provisioning identity", e))?;
+        Ok((
+            out.account().unwrap_or_default().to_owned(),
+            out.arn().unwrap_or_default().to_owned(),
+        ))
+    }
+
+    async fn ensure_user(&self, user: &IamUser<'_>) -> Result<String> {
+        match self.iam.get_user().user_name(user.name).send().await {
+            Ok(out) => {
+                let u = out.user().ok_or_else(|| {
+                    AppError::Invalid(format!(
+                        "backend {}: IAM user {} has no details",
+                        self.backend, user.name
+                    ))
+                })?;
+                let boundary = u
+                    .permissions_boundary()
+                    .and_then(|b| b.permissions_boundary_arn());
+                if boundary != Some(user.boundary) {
+                    return Err(AppError::Invalid(format!(
+                        "backend {}: IAM user {} exists without the permissions boundary {}; ikit won't use it",
+                        self.backend, user.name, user.boundary
+                    )));
+                }
+                return Ok(u.arn().to_owned());
+            }
+            Err(e)
+                if e.as_service_error()
+                    .is_some_and(|s| s.is_no_such_entity_exception()) => {}
+            Err(e) => return Err(self.error(&format!("looking up IAM user {}", user.name), e)),
+        }
+        let mut create = self
+            .iam
+            .create_user()
+            .user_name(user.name)
+            .path(user.path)
+            .permissions_boundary(user.boundary);
+        for (k, v) in user.tags {
+            if let Ok(tag) = aws_sdk_iam::types::Tag::builder().key(k).value(v).build() {
+                create = create.tags(tag);
+            }
+        }
+        let out = create
+            .send()
+            .await
+            .map_err(|e| self.error(&format!("creating IAM user {}", user.name), e))?;
+        Ok(out.user().map(|u| u.arn().to_owned()).unwrap_or_default())
+    }
+
+    async fn put_user_policy(&self, user: &str, name: &str, document: &str) -> Result<()> {
+        self.iam
+            .put_user_policy()
+            .user_name(user)
+            .policy_name(name)
+            .policy_document(document)
+            .send()
+            .await
+            .map_err(|e| self.error(&format!("setting the policy of IAM user {user}"), e))?;
+        Ok(())
+    }
+
+    async fn access_keys(&self, user: &str) -> Result<Vec<String>> {
+        let out = self
+            .iam
+            .list_access_keys()
+            .user_name(user)
+            .send()
+            .await
+            .map_err(|e| self.error(&format!("listing the keys of IAM user {user}"), e))?;
+        Ok(out
+            .access_key_metadata()
+            .iter()
+            .filter_map(|k| k.access_key_id().map(str::to_owned))
+            .collect())
+    }
+
+    async fn create_access_key(&self, user: &str) -> Result<Keys> {
+        let out = self
+            .iam
+            .create_access_key()
+            .user_name(user)
+            .send()
+            .await
+            .map_err(|e| self.error(&format!("creating a key for IAM user {user}"), e))?;
+        let key = out.access_key().ok_or_else(|| {
+            AppError::Invalid(format!(
+                "backend {}: no key returned for {user}",
+                self.backend
+            ))
+        })?;
+        Ok(Keys {
+            access_key_id: key.access_key_id().to_owned(),
+            secret_access_key: key.secret_access_key().to_owned(),
+            session_token: None,
+        })
+    }
+
+    async fn delete_access_key(&self, user: &str, id: &str) -> Result<()> {
+        match self
+            .iam
+            .delete_access_key()
+            .user_name(user)
+            .access_key_id(id)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e)
+                if e.as_service_error()
+                    .is_some_and(|s| s.is_no_such_entity_exception()) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(self.error(&format!("deleting key {id} of IAM user {user}"), e)),
+        }
+    }
+
+    async fn delete_user(&self, user: &str) -> Result<()> {
+        let policies = match self.iam.list_user_policies().user_name(user).send().await {
+            Ok(out) => out.policy_names().to_vec(),
+            Err(e)
+                if e.as_service_error()
+                    .is_some_and(|s| s.is_no_such_entity_exception()) =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(self.error(&format!("listing policies of IAM user {user}"), e)),
+        };
+        for p in policies {
+            self.iam
+                .delete_user_policy()
+                .user_name(user)
+                .policy_name(&p)
+                .send()
+                .await
+                .map_err(|e| self.error(&format!("deleting policy {p} of IAM user {user}"), e))?;
+        }
+        for id in self.access_keys(user).await? {
+            self.delete_access_key(user, &id).await?;
+        }
+        self.iam
+            .delete_user()
+            .user_name(user)
+            .send()
+            .await
+            .map_err(|e| self.error(&format!("deleting IAM user {user}"), e))?;
+        Ok(())
+    }
+
+    async fn wait_for_key(&self, keys: &Keys) -> Result<()> {
+        let conf = aws_sdk_sts::config::Builder::from(&self.conf)
+            .credentials_provider(aws_sdk_sts::config::Credentials::new(
+                keys.access_key_id.clone(),
+                keys.secret_access_key.clone(),
+                None,
+                None,
+                "ikit-new-key",
+            ))
+            .build();
+        let sts = aws_sdk_sts::Client::from_conf(conf);
+        let start = std::time::Instant::now();
+        loop {
+            match sts.get_caller_identity().send().await {
+                Ok(_) => return Ok(()),
+                Err(e) if start.elapsed() > KEY_WAIT => {
+                    return Err(self.error(
+                        &format!(
+                            "new key {} still not accepted after a minute",
+                            keys.access_key_id
+                        ),
+                        e,
+                    ));
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
+            }
+        }
     }
 }

@@ -12,7 +12,7 @@ use ikit_core::target::{Check, TargetOrigin};
 use ikit_core::{AutoRoutes, EdgeConfig, Redirect, Route, RouteOrigin, TlsMode};
 use ikit_core::{
     Backend, BackendOptions, Backup, Binding, Category, Connection, DockerNetwork, Hook,
-    HookAction, HookPhase, HookRunRecord, Network, NetworkOrigin, Profile, ProfileKind,
+    HookAction, HookPhase, HookRunRecord, Identity, Network, NetworkOrigin, Profile, ProfileKind,
     PublishedPort, RegistryEntry, RegistryVersion, Resource, ResourceApi, ResourceOrigin,
     ResourceProvider, ResourceStatus, Run, RunAction, RunResult, ServiceInstance, SqlEngine,
     Storage, StorageOptions, StorageProvider, Target, TargetStatus, VersionConstraint, Workload,
@@ -191,6 +191,49 @@ pub trait ResourceRepo: Send + Sync {
     /// Fails with `NotFound` for an unknown backend.
     async fn update(&self, id: i64, update: ResourceUpdate<'_>) -> Result<()>;
     async fn delete(&self, id: i64) -> Result<bool>;
+    /// Replaces a backend's options. Fails with `NotFound` for an unknown backend.
+    async fn set_backend_options(&self, name: &str, options: &BackendOptions) -> Result<()>;
+    /// IAM users of one workload, or of every workload, by workload, service, profile.
+    async fn identities(&self, workload_id: Option<i64>) -> Result<Vec<Identity>>;
+    /// Fails with `Conflict` if the service already has one for that profile.
+    async fn insert_identity(&self, workload_id: i64, new: NewIdentity<'_>) -> Result<Identity>;
+    async fn update_identity(&self, id: i64, update: IdentityUpdate<'_>) -> Result<()>;
+    async fn delete_identity(&self, id: i64) -> Result<bool>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewIdentity<'a> {
+    pub service: &'a str,
+    pub profile: &'a str,
+    pub user_name: &'a str,
+}
+
+/// Every mutable field of an identity; callers start from the current [`Identity`].
+#[derive(Debug, Clone, Copy)]
+pub struct IdentityUpdate<'a> {
+    pub account: Option<&'a str>,
+    pub user_arn: Option<&'a str>,
+    pub access_key_id: Option<&'a str>,
+    pub retiring_key_id: Option<&'a str>,
+    pub covers: &'a [String],
+    pub status: ResourceStatus,
+    pub orphaned: bool,
+    pub rotated_at: Option<DateTime<Utc>>,
+}
+
+impl<'a> From<&'a Identity> for IdentityUpdate<'a> {
+    fn from(i: &'a Identity) -> Self {
+        Self {
+            account: i.account.as_deref(),
+            user_arn: i.user_arn.as_deref(),
+            access_key_id: i.access_key_id.as_deref(),
+            retiring_key_id: i.retiring_key_id.as_deref(),
+            covers: &i.covers,
+            status: i.status,
+            orphaned: i.orphaned,
+            rotated_at: i.rotated_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

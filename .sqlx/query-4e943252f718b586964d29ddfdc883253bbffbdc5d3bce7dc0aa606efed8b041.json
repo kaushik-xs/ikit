@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE resource_backends SET options_json = ? WHERE name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4e943252f718b586964d29ddfdc883253bbffbdc5d3bce7dc0aa606efed8b041"
+}

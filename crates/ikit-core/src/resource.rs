@@ -252,6 +252,13 @@ pub struct BackendOptions {
     /// the `endpoint` field, so it must be reachable from the target too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// Give each service an IAM user and key of its own instead of the profile's keys.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_service_keys: bool,
+    /// ARN of the permissions boundary every IAM user ikit creates carries. Required with
+    /// `per_service_keys`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
 }
 
 /// An org-level place that provides one API.
@@ -306,6 +313,45 @@ impl Resource {
     pub fn address(&self) -> String {
         format!("{}.{}", self.service, self.name)
     }
+}
+
+/// An IAM user ikit created for one workload service, and its current access key. The
+/// secret half lives in the org's secret store, never here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Identity {
+    pub id: i64,
+    pub workload: String,
+    pub service: String,
+    /// The provisioning profile it was created with (`""`: the environment's credentials).
+    pub profile: String,
+    /// AWS account ID, once created.
+    pub account: Option<String>,
+    pub user_name: String,
+    pub user_arn: Option<String>,
+    pub access_key_id: Option<String>,
+    /// A key being rotated out; deleted after the next successful apply.
+    pub retiring_key_id: Option<String>,
+    /// Resources (`<service>.<resource>`) the user's policy covers, as last applied.
+    pub covers: Vec<String>,
+    pub status: ResourceStatus,
+    pub orphaned: bool,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: Option<DateTime<Utc>>,
+}
+
+/// IAM user names: `<workload>-<service>`, at most 64 characters; a longer one is cut and
+/// ends in a short hash of the full name so it stays unique.
+pub fn identity_user_name(workload: &str, service: &str, hash: impl Fn(&str) -> String) -> String {
+    let full = format!("{workload}-{service}");
+    if full.len() <= 64 {
+        return full;
+    }
+    let tail = format!("-{}", hash(&full));
+    let mut cut: String = full.chars().take(64 - tail.len()).collect();
+    while cut.ends_with('-') {
+        cut.pop();
+    }
+    format!("{cut}{tail}")
 }
 
 /// The default name of a resource at its backend: `<workload>-<service>-<resource>`, cut to

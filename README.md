@@ -130,6 +130,10 @@ ikit res bind sim.jobs aws-sqs                     # this one elsewhere (before 
 ikit res adopt sim.assets acme-dev-simulation-b88b643e   # use an existing bucket or queue
 ikit res rm sim.jobs [--keep]                      # after `ikit svc rm sim`
 ikit wl rm wl-acme-dev-002 --delete-resources      # or --keep-resources
+ikit res backend iam-policy aws-sqs                # boundary + provisioning policies to apply
+ikit res backend set aws-sqs --per-service-keys --boundary arn:aws:iam::123456789012:policy/ikit-acme-boundary
+ikit res keys [--all] | rm sim [--keep]            # each service's own IAM user and key
+ikit res rotate sim                                # new key; the next apply retires the old one
 ```
 
 ### Backups
@@ -164,6 +168,14 @@ Design and later phases: [docs/resources.md](docs/resources.md).
 - Removing a service orphans its resources; `res rm` deletes one (a bucket must be empty) or,
   with `--keep`, forgets it. Adopted resources are never deleted, only forgotten. `wl rm` is
   refused while resources ikit created exist, unless `--delete-resources` or `--keep-resources`.
+- By default services get the backend profile's keys. With `--per-service-keys` (AWS only),
+  `apply` gives each service an IAM user `<workload>-<service>` under `/ikit/<org>/`, with one
+  inline policy covering exactly its resources (shared ones included), and keeps its access key
+  in the org's secret store (`org.age` when the org has one). Every such user carries the
+  backend's `--boundary` policy; `res backend iam-policy` prints that boundary and the IAM policy
+  the provisioning identity needs (users only under the org's path, only with the boundary).
+  ikit doesn't create either policy. `res rotate` adds a second key; the apply that redeploys the
+  service deletes the old one.
 
 ### Remote state
 

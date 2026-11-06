@@ -1,7 +1,7 @@
 //! `ikit res ...`: buckets and queues services need, and the backends that provide them.
 
 use clap::Subcommand;
-use ikit_app::{NewBackendRequest, ResourceInfo};
+use ikit_app::{BackendChanges, NewBackendRequest, ResourceInfo};
 use ikit_core::{Backend, BackendOptions, ResourceApi, ResourceProvider};
 
 use crate::Ctx;
@@ -41,6 +41,32 @@ pub enum ResourceCmd {
     /// Backends that provide resources, and which one each env uses.
     #[command(subcommand)]
     Backend(BackendCmd),
+    /// IAM users ikit created for the workload's services (backends with per-service keys).
+    #[command(subcommand)]
+    Keys(KeysCmd),
+    /// Give a service a new access key. The next `ikit apply` redeploys it with the new key and
+    /// then deletes the old one.
+    Rotate { service: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysCmd {
+    /// List the workload's IAM users (or, with --all, every workload's).
+    #[command(alias = "ls")]
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Delete the IAM user and keys of a service removed from the workload.
+    #[command(alias = "remove")]
+    Rm {
+        service: String,
+        /// Forget them but leave them in IAM.
+        #[arg(long)]
+        keep: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -62,6 +88,34 @@ pub enum BackendCmd {
         /// A compatible server, e.g. http://minio.lan:9000. Must be reachable from targets.
         #[arg(long)]
         endpoint: Option<String>,
+        /// Give each service an IAM user and key of its own (AWS only; needs --boundary).
+        #[arg(long, requires = "boundary")]
+        per_service_keys: bool,
+        /// Permissions boundary (policy ARN) every IAM user ikit creates carries.
+        #[arg(long)]
+        boundary: Option<String>,
+    },
+    /// Turn per-service keys on or off, or change the boundary. Takes effect on each workload's
+    /// next apply.
+    Set {
+        name: String,
+        #[arg(long, conflicts_with = "no_per_service_keys")]
+        per_service_keys: bool,
+        /// Back to the profile's keys; existing IAM users stay until `res keys rm` or `wl rm`.
+        #[arg(long)]
+        no_per_service_keys: bool,
+        /// Permissions boundary (policy ARN); "" clears it.
+        #[arg(long)]
+        boundary: Option<String>,
+    },
+    /// Print the permissions boundary and the provisioning identity's policy that per-service
+    /// keys need, for this backend's account. Apply them yourself (e.g. with Terraform).
+    IamPolicy {
+        name: String,
+    },
+    /// Check the backend's credentials: who they are, and for per-service keys the boundary.
+    Test {
+        name: String,
     },
     /// List backends and the envs bound to them.
     #[command(alias = "ls")]
@@ -212,6 +266,83 @@ pub async fn run(ctx: &Ctx, cmd: ResourceCmd) -> anyhow::Result<()> {
             }
         }
         ResourceCmd::Backend(cmd) => return backend(ctx, &app, cmd).await,
+        ResourceCmd::Keys(KeysCmd::List { all }) => {
+            let wl = if all { None } else { Some(workload()?) };
+            let list = app.identities_list(wl.as_deref()).await?;
+            if ctx.output == Output::Json {
+                return print_json(&list);
+            }
+            if list.is_empty() {
+                println!(
+                    "No IAM users. Services get their own on backends with per-service keys (`ikit res backend set <name> --per-service-keys`)."
+                );
+                return Ok(());
+            }
+            let mut headers = vec!["SERVICE", "IAM USER", "KEY", "SINCE", "COVERS", "STATUS"];
+            if all {
+                headers.insert(0, "WORKLOAD");
+            }
+            let mut t = table(&headers);
+            for i in &list {
+                let mut status = i.status.to_string();
+                if i.retiring_key_id.is_some() {
+                    status.push_str(", old key retires on apply");
+                }
+                if i.orphaned {
+                    status.push_str(", orphaned");
+                }
+                let since = i
+                    .rotated_at
+                    .unwrap_or(i.created_at)
+                    .format("%Y-%m-%d")
+                    .to_string();
+                let mut row = vec![
+                    i.service.clone(),
+                    i.user_name.clone(),
+                    i.access_key_id.clone().unwrap_or_default(),
+                    since,
+                    i.covers.join("\n"),
+                    status,
+                ];
+                if all {
+                    row.insert(0, i.workload.clone());
+                }
+                t.add_row(row);
+            }
+            println!("{t}");
+        }
+        ResourceCmd::Keys(KeysCmd::Rm { service, keep, yes }) => {
+            let wl = workload()?;
+            let question = if keep {
+                format!("Forget the IAM user of {service}? It stays in IAM.")
+            } else {
+                format!("Delete the IAM user and keys of {service}?")
+            };
+            if ctx.confirm(&question, yes)? {
+                let deleted = app.identity_remove(&wl, &service, keep).await?;
+                if ctx.output == Output::Table {
+                    println!(
+                        "{} the IAM user of {service}.",
+                        if deleted { "Deleted" } else { "Forgot" }
+                    );
+                }
+            }
+        }
+        ResourceCmd::Rotate { service } => {
+            let wl = workload()?;
+            let rotated = app.identity_rotate(&wl, &service).await?;
+            if ctx.output == Output::Json {
+                return print_json(&rotated);
+            }
+            for i in &rotated {
+                println!(
+                    "{} has a new key {}; run `ikit apply` to redeploy {service} with it, which then deletes {}.",
+                    i.user_name,
+                    i.access_key_id.as_deref().unwrap_or_default(),
+                    i.retiring_key_id.as_deref().unwrap_or_default()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -244,6 +375,8 @@ async fn backend(ctx: &Ctx, app: &ikit_app::App, cmd: BackendCmd) -> anyhow::Res
             profile,
             region,
             endpoint,
+            per_service_keys,
+            boundary,
         } => {
             let b = app
                 .resource_backend_add(NewBackendRequest {
@@ -251,7 +384,12 @@ async fn backend(ctx: &Ctx, app: &ikit_app::App, cmd: BackendCmd) -> anyhow::Res
                     api,
                     provider,
                     profile,
-                    options: BackendOptions { region, endpoint },
+                    options: BackendOptions {
+                        region,
+                        endpoint,
+                        per_service_keys,
+                        boundary,
+                    },
                 })
                 .await?;
             if ctx.output == Output::Json {
@@ -295,6 +433,76 @@ async fn backend(ctx: &Ctx, app: &ikit_app::App, cmd: BackendCmd) -> anyhow::Res
             }
             println!("{t}");
         }
+        BackendCmd::Set {
+            name,
+            per_service_keys,
+            no_per_service_keys,
+            boundary,
+        } => {
+            let changes = BackendChanges {
+                per_service_keys: (per_service_keys || no_per_service_keys)
+                    .then_some(per_service_keys),
+                boundary: boundary.map(|b| (!b.is_empty()).then_some(b)),
+            };
+            if changes.per_service_keys.is_none() && changes.boundary.is_none() {
+                anyhow::bail!(
+                    "nothing to change; pass --per-service-keys, --no-per-service-keys or --boundary"
+                );
+            }
+            let b = app.resource_backend_set(&name, changes).await?;
+            if ctx.output == Output::Json {
+                return print_json(&b);
+            }
+            if b.options.per_service_keys {
+                println!(
+                    "Services on {name} get IAM users of their own from their workload's next `ikit apply`."
+                );
+            } else {
+                println!(
+                    "Services on {name} get the profile's keys from their workload's next `ikit apply`."
+                );
+            }
+        }
+        BackendCmd::IamPolicy { name } => {
+            let p = app.identity_policies(&name).await?;
+            if ctx.output == Output::Json {
+                return print_json(&p);
+            }
+            println!(
+                "# Account {} (provisioning identity {}).",
+                p.account, p.caller
+            );
+            println!(
+                "# 1. Create this policy as the permissions boundary {}:",
+                p.boundary_arn
+            );
+            println!("{}", serde_json::to_string_pretty(&p.boundary)?);
+            println!();
+            println!("# 2. Attach this policy to the provisioning identity:");
+            println!("{}", serde_json::to_string_pretty(&p.provisioning)?);
+            println!();
+            println!(
+                "# 3. Then: ikit res backend set {} --per-service-keys --boundary {}",
+                p.backend, p.boundary_arn
+            );
+        }
+        BackendCmd::Test { name } => {
+            let b = app.resource_backend_show(&name).await?;
+            let p = app.identity_policies(&name).await?;
+            if ctx.output == Output::Json {
+                return print_json(&serde_json::json!({
+                    "backend": name, "account": p.account, "caller": p.caller,
+                    "per_service_keys": b.options.per_service_keys, "boundary": b.options.boundary,
+                }));
+            }
+            println!("ok: {name} reaches account {} as {}", p.account, p.caller);
+            match (&b.options.per_service_keys, &b.options.boundary) {
+                (true, Some(boundary)) => println!(
+                    "per-service keys: on; IAM users get the boundary {boundary} (it isn't checked:                      reading policies needs more than the provisioning policy allows)"
+                ),
+                _ => println!("per-service keys: off; services get the profile's keys"),
+            }
+        }
         BackendCmd::Show { name } => {
             let b = app.resource_backend_show(&name).await?;
             if ctx.output == Output::Json {
@@ -309,6 +517,15 @@ async fn backend(ctx: &Ctx, app: &ikit_app::App, cmd: BackendCmd) -> anyhow::Res
                 "profile".into(),
                 b.profile.clone().unwrap_or_else(|| "(environment)".into()),
             ]);
+            let keys = if b.options.per_service_keys {
+                "own IAM user per service"
+            } else {
+                "the profile's"
+            };
+            t.add_row(vec!["keys for services".to_owned(), keys.to_owned()]);
+            if let Some(boundary) = &b.options.boundary {
+                t.add_row(vec!["boundary".into(), boundary.clone()]);
+            }
             println!("{t}");
         }
         BackendCmd::Rm { name, yes } => {

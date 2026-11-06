@@ -12,7 +12,7 @@ use crate::cmd::net::{DockerCmd, NetCmd, ZtCmd};
 use crate::cmd::org::{OrgCmd, SecretsCmd};
 use crate::cmd::profile::ProfileCmd;
 use crate::cmd::registry::RegistryCmd;
-use crate::cmd::resource::{BackendCmd, ResourceCmd};
+use crate::cmd::resource::{BackendCmd, KeysCmd, ResourceCmd};
 use crate::cmd::route::RouteCmd;
 use crate::cmd::service::ServiceCmd;
 use crate::cmd::storage::StorageCmd;
@@ -170,13 +170,22 @@ impl Command {
             Command::Resource(c) => match c {
                 ResourceCmd::List { .. }
                 | ResourceCmd::Show { .. }
-                | ResourceCmd::Backend(BackendCmd::List | BackendCmd::Show { .. }) => Read,
+                | ResourceCmd::Keys(KeysCmd::List { .. })
+                | ResourceCmd::Backend(
+                    BackendCmd::List
+                    | BackendCmd::Show { .. }
+                    | BackendCmd::IamPolicy { .. }
+                    | BackendCmd::Test { .. },
+                ) => Read,
                 // Adopting and removing reach the backend; all of these change the state.
                 ResourceCmd::Bind { .. }
                 | ResourceCmd::Adopt { .. }
                 | ResourceCmd::Rm { .. }
+                | ResourceCmd::Keys(KeysCmd::Rm { .. })
+                | ResourceCmd::Rotate { .. }
                 | ResourceCmd::Backend(
                     BackendCmd::Add { .. }
+                    | BackendCmd::Set { .. }
                     | BackendCmd::Rm { .. }
                     | BackendCmd::Bind { .. }
                     | BackendCmd::Unbind { .. },

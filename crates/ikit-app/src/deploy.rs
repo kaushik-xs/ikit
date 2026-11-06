@@ -49,6 +49,12 @@ pub struct DeployPlan {
     /// Buckets and queues `apply` creates before deploying.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<crate::ResourcePlan>,
+    /// IAM users, policies and keys of services on backends with per-service keys.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<crate::IdentityPlan>,
+    /// Things that won't stop the apply but likely need attention.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     #[serde(skip)]
     pub rendered: Rendered,
 }
@@ -58,6 +64,7 @@ impl DeployPlan {
     pub fn needs_apply(&self) -> bool {
         !self.plan.is_empty()
             || !self.resources.is_empty()
+            || !self.identities.is_empty()
             || self.status != WorkloadStatus::Applied
             || self.edge.as_ref().is_some_and(|e| !e.changes.is_empty())
             || self
@@ -461,6 +468,8 @@ impl App {
         blockers.extend(edge_blockers);
         let (resources, resource_blockers) = self.resource_plans(&wl).await?;
         blockers.extend(resource_blockers);
+        let identities = self.identity_plans(&wl).await?;
+        let warnings = self.boundary_warnings(&wl).await?;
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -470,6 +479,8 @@ impl App {
             blockers,
             edge,
             resources,
+            identities,
+            warnings,
             rendered,
         })
     }
@@ -565,6 +576,7 @@ impl App {
         if plan.plan != expected.plan
             || plan.rendered != expected.rendered
             || plan.resources != expected.resources
+            || plan.identities != expected.identities
             || plan.edge.as_ref().map(|e| &e.changes) != expected.edge.as_ref().map(|e| &e.changes)
         {
             return Err(AppError::Invalid(format!(
@@ -585,10 +597,13 @@ impl App {
 
         let outcome = async {
             // Resources first: services read their names and URLs from the compose file.
-            let rendered = if self.ensure_resources(wl).await?.is_empty() {
-                plan.rendered.clone()
-            } else {
+            let created = !self.ensure_resources(wl).await?.is_empty();
+            // Then the services' own IAM users, which need the resources' ARNs.
+            let keyed = self.ensure_identities(wl).await?;
+            let rendered = if created || keyed || !plan.identities.is_empty() {
                 self.render_workload(&wl.name).await?
+            } else {
+                plan.rendered.clone()
             };
             let mut ran = self
                 .run_phase(
@@ -624,6 +639,8 @@ impl App {
             if !out.success() {
                 return Err(failed("docker compose up", &out));
             }
+            // Services run with their new keys now; the rotated-out ones can go.
+            self.retire_keys(wl).await?;
             // The proxy switches over once the services are up and healthy.
             if let Some(edge) = &plan.edge {
                 self.edge_apply(&target, edge).await?;
@@ -1923,6 +1940,145 @@ services:
             .await
             .unwrap();
         app.resource_backend_remove("aws-sqs").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_service_keys_give_each_service_its_own_iam_user() {
+        let (_dir, app, _docker, driver) = setup_sim().await;
+        let wl = "wl-acme-dev-001";
+        add_backends(&app).await;
+        let boundary = "arn:aws:iam::123456789012:policy/ikit-acme-boundary";
+        // Needs a boundary.
+        assert!(
+            app.resource_backend_set(
+                "aws-sqs",
+                crate::BackendChanges {
+                    per_service_keys: Some(true),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        for b in ["aws-s3", "aws-sqs"] {
+            app.resource_backend_set(
+                b,
+                crate::BackendChanges {
+                    per_service_keys: Some(true),
+                    boundary: Some(Some(boundary.into())),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let plan = app.deploy_plan(wl).await.unwrap();
+        let users: Vec<(&str, &[String])> = plan
+            .identities
+            .iter()
+            .map(|i| (i.user_name.as_str(), i.covers.as_slice()))
+            .collect();
+        assert_eq!(
+            users,
+            [
+                (
+                    "wl-acme-dev-001-sim",
+                    &["sim.assets".to_owned(), "sim.jobs".to_owned()][..]
+                ),
+                ("wl-acme-dev-001-sim-worker", &["sim.jobs".to_owned()][..]),
+            ]
+        );
+        assert!(
+            !plan.rendered.secrets.contains("s3cret"),
+            "no backend keys for services"
+        );
+
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        {
+            let users = driver.users.lock().unwrap();
+            let sim = &users["wl-acme-dev-001-sim"];
+            assert_eq!(sim.path, "/ikit/acme/");
+            assert_eq!(sim.boundary, boundary);
+            assert!(
+                sim.policy
+                    .contains("arn:aws:s3:::wl-acme-dev-001-sim-assets-")
+            );
+            assert!(sim.policy.contains("wl-acme-dev-001-sim-jobs-dlq"));
+            let worker = &users["wl-acme-dev-001-sim-worker"];
+            assert!(
+                !worker.policy.contains("s3:::"),
+                "the worker only shares the queue"
+            );
+            assert_eq!(worker.keys.len(), 1);
+        }
+        let secrets_file =
+            std::fs::read_to_string(app.org().dir.join("deploy").join(wl).join(SECRETS_FILE))
+                .unwrap();
+        let sim_key = driver.users.lock().unwrap()["wl-acme-dev-001-sim"].keys[0]
+            .1
+            .clone();
+        assert!(secrets_file.contains(&sim_key), "{secrets_file}");
+        assert!(!secrets_file.contains("s3cret"));
+        assert!(!app.deploy_plan(wl).await.unwrap().needs_apply());
+
+        // Rotation: a second key now, the first deleted by the apply that redeploys.
+        let rotated = app.identity_rotate(wl, "sim").await.unwrap();
+        assert!(rotated[0].retiring_key_id.is_some());
+        assert_eq!(
+            driver.users.lock().unwrap()["wl-acme-dev-001-sim"]
+                .keys
+                .len(),
+            2
+        );
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(
+            plan.identities
+                .iter()
+                .any(|i| i.action == crate::IdentityAction::RetireKey)
+        );
+        assert!(
+            plan.rendered.secrets.contains("secret3"),
+            "the new key is deployed"
+        );
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        let keys = driver.users.lock().unwrap()["wl-acme-dev-001-sim"]
+            .keys
+            .clone();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].1, "secret3");
+
+        // A lost secret (another machine with a keychain org): a new key replaces it.
+        app.secrets
+            .delete("org/acme/workload/wl-acme-dev-001/identity/sim-worker")
+            .unwrap();
+        let plan = app.deploy_plan(wl).await.unwrap();
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        let keys = driver.users.lock().unwrap()["wl-acme-dev-001-sim-worker"]
+            .keys
+            .clone();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, "AKIAFAKE4");
+
+        // Removing the workload deletes the users with the resources.
+        app.deploy_destroy(wl, false, "test").await.unwrap();
+        let err = app
+            .workload_remove(wl, crate::ResourcePolicy::Refuse)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("IAM user wl-acme-dev-001-sim"),
+            "{err}"
+        );
+        app.workload_remove(wl, crate::ResourcePolicy::Delete)
+            .await
+            .unwrap();
+        assert!(driver.users.lock().unwrap().is_empty());
+        assert!(
+            app.secrets
+                .get("org/acme/workload/wl-acme-dev-001/identity/sim")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

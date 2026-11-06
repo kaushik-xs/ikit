@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ikit_core::{Backend, BackendOptions, Binding, Resource, ResourceApi, UnknownVariant};
+use ikit_core::{
+    Backend, BackendOptions, Binding, Identity, Resource, ResourceApi, UnknownVariant,
+};
 use sqlx::SqlitePool;
 use sqlx::types::Json;
 
 use crate::{
-    NewBackend, NewResource, ResourceRepo, ResourceUpdate, Result, StateError, map_constraint,
+    IdentityUpdate, NewBackend, NewIdentity, NewResource, ResourceRepo, ResourceUpdate, Result,
+    StateError, map_constraint,
 };
 
 pub(super) struct SqliteResources {
@@ -94,6 +97,46 @@ impl TryFrom<ResourceRow> for Resource {
             orphaned: r.orphaned != 0,
             created_at: r.created_at,
             updated_at: r.updated_at,
+        })
+    }
+}
+
+struct IdentityRow {
+    id: i64,
+    workload: String,
+    service: String,
+    profile: String,
+    account: Option<String>,
+    user_name: String,
+    user_arn: Option<String>,
+    access_key_id: Option<String>,
+    retiring_key_id: Option<String>,
+    covers_json: Json<Vec<String>>,
+    status: String,
+    orphaned: i64,
+    created_at: DateTime<Utc>,
+    rotated_at: Option<DateTime<Utc>>,
+}
+
+impl TryFrom<IdentityRow> for Identity {
+    type Error = StateError;
+
+    fn try_from(r: IdentityRow) -> Result<Self> {
+        Ok(Self {
+            id: r.id,
+            status: r.status.parse().map_err(corrupt)?,
+            workload: r.workload,
+            service: r.service,
+            profile: r.profile,
+            account: r.account,
+            user_name: r.user_name,
+            user_arn: r.user_arn,
+            access_key_id: r.access_key_id,
+            retiring_key_id: r.retiring_key_id,
+            covers: r.covers_json.0,
+            orphaned: r.orphaned != 0,
+            created_at: r.created_at,
+            rotated_at: r.rotated_at,
         })
     }
 }
@@ -318,13 +361,110 @@ impl ResourceRepo for SqliteResources {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn set_backend_options(&self, name: &str, options: &BackendOptions) -> Result<()> {
+        let options = Json(options);
+        let result = sqlx::query!(
+            "UPDATE resource_backends SET options_json = ? WHERE name = ?",
+            options,
+            name
+        )
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StateError::NotFound(format!("backend {name}")));
+        }
+        Ok(())
+    }
+
+    async fn identities(&self, workload_id: Option<i64>) -> Result<Vec<Identity>> {
+        sqlx::query_as!(
+            IdentityRow,
+            r#"SELECT i.id AS "id!", w.name AS workload, i.service, i.profile, i.account,
+                      i.user_name, i.user_arn, i.access_key_id, i.retiring_key_id,
+                      i.covers_json AS "covers_json: Json<Vec<String>>",
+                      i.status, i.orphaned,
+                      i.created_at AS "created_at: DateTime<Utc>",
+                      i.rotated_at AS "rotated_at: DateTime<Utc>"
+               FROM service_identities i
+               JOIN workloads w ON w.id = i.workload_id
+               WHERE ?1 IS NULL OR i.workload_id = ?1
+               ORDER BY w.name, i.service, i.profile"#,
+            workload_id,
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(Identity::try_from)
+        .collect()
+    }
+
+    async fn insert_identity(&self, workload_id: i64, new: NewIdentity<'_>) -> Result<Identity> {
+        let now = Utc::now();
+        let id = sqlx::query_scalar!(
+            r#"INSERT INTO service_identities
+                   (workload_id, service, profile, user_name, status, created_at)
+               VALUES (?, ?, ?, ?, 'pending', ?)
+               RETURNING id AS "id!""#,
+            workload_id,
+            new.service,
+            new.profile,
+            new.user_name,
+            now,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_constraint(format!("identity of {}", new.service)))?;
+        self.identities(Some(workload_id))
+            .await?
+            .into_iter()
+            .find(|i| i.id == id)
+            .ok_or_else(|| StateError::NotFound(format!("identity {id}")))
+    }
+
+    async fn update_identity(&self, id: i64, u: IdentityUpdate<'_>) -> Result<()> {
+        let covers = Json(u.covers);
+        let status = u.status.as_str();
+        let orphaned = i64::from(u.orphaned);
+        let result = sqlx::query!(
+            r#"UPDATE service_identities
+               SET account = ?, user_arn = ?, access_key_id = ?, retiring_key_id = ?,
+                   covers_json = ?, status = ?, orphaned = ?, rotated_at = ?
+               WHERE id = ?"#,
+            u.account,
+            u.user_arn,
+            u.access_key_id,
+            u.retiring_key_id,
+            covers,
+            status,
+            orphaned,
+            u.rotated_at,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StateError::NotFound(format!("identity {id}")));
+        }
+        Ok(())
+    }
+
+    async fn delete_identity(&self, id: i64) -> Result<bool> {
+        let result = sqlx::query!("DELETE FROM service_identities WHERE id = ?", id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use ikit_core::{ResourceOrigin, ResourceProvider, ResourceStatus};
 
-    use crate::{NewBackend, NewResource, ResourceUpdate, SqliteStore, StateError, StateStore};
+    use crate::{
+        IdentityUpdate, NewBackend, NewIdentity, NewResource, ResourceUpdate, SqliteStore,
+        StateError, StateStore,
+    };
 
     use super::*;
 
@@ -367,7 +507,7 @@ mod tests {
         let r = store.resources();
         let opts = BackendOptions {
             region: Some("ap-south-1".into()),
-            endpoint: None,
+            ..Default::default()
         };
         r.insert_backend(backend("aws-sqs", ResourceApi::Sqs, &opts))
             .await
@@ -435,9 +575,46 @@ mod tests {
         assert!(r.unbind("dev", ResourceApi::S3).await.unwrap());
         assert!(r.delete_backend("aws-s3").await.unwrap());
 
+        // Identities.
+        let ident = r
+            .insert_identity(
+                wl,
+                NewIdentity {
+                    service: "sim",
+                    profile: "acme",
+                    user_name: "wl-acme-dev-001-sim",
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ident.status, ResourceStatus::Pending);
+        let mut ready = ident.clone();
+        ready.status = ResourceStatus::Ready;
+        ready.access_key_id = Some("AKIA1".into());
+        ready.covers = vec!["sim.jobs".into()];
+        r.update_identity(ready.id, IdentityUpdate::from(&ready))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.identities(Some(wl)).await.unwrap(),
+            [Identity { ..ready }]
+        );
+        let mut opts2 = opts.clone();
+        opts2.per_service_keys = true;
+        r.set_backend_options("aws-sqs", &opts2).await.unwrap();
+        assert!(
+            r.backend("aws-sqs")
+                .await
+                .unwrap()
+                .unwrap()
+                .options
+                .per_service_keys
+        );
+
         // Workload removal cascades.
         store.workloads().delete("wl-acme-dev-001").await.unwrap();
         assert!(r.list(None).await.unwrap().is_empty());
+        assert!(r.identities(None).await.unwrap().is_empty());
         assert!(r.delete_backend("aws-sqs").await.unwrap());
     }
 }

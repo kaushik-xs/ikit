@@ -68,8 +68,8 @@ pub use registry::{
 };
 pub use remote::{Head, LockInfo, RemoteSpec};
 pub use resource::{
-    Backend, BackendOptions, Binding, Need, NeedOptions, Resource, ResourceApi, ResourceKind,
-    ResourceOrigin, ResourceProvider, ResourceStatus,
+    Backend, BackendOptions, Binding, Identity, Need, NeedOptions, Resource, ResourceApi,
+    ResourceKind, ResourceOrigin, ResourceProvider, ResourceStatus,
 };
 pub use storage::{Backup, Storage, StorageOptions, StorageProvider};
 pub use target::{Connection, Target, TargetKind, TargetStatus, ZtRoute};
