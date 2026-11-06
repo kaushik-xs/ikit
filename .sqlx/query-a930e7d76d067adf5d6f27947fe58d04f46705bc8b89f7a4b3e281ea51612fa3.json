@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", name, api, provider, profile,\n                      options_json AS \"options_json: Json<BackendOptions>\",\n                      created_at AS \"created_at: DateTime<Utc>\"\n               FROM resource_backends ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "api",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "provider",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "options_json: Json<BackendOptions>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a930e7d76d067adf5d6f27947fe58d04f46705bc8b89f7a4b3e281ea51612fa3"
+}

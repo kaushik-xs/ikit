@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use ikit_core::registry::EnvVar;
-use ikit_core::{Category, DockerNetwork, ServiceInstance, ServiceSpec};
+use ikit_core::resource::parse_reference;
+use ikit_core::{Category, DockerNetwork, ResourceApi, ServiceInstance, ServiceSpec};
 use serde::Serialize;
 
 /// One service with everything needed to render it.
@@ -16,6 +17,18 @@ pub struct ServiceInput {
     pub secrets: BTreeMap<String, String>,
     /// URLs the service answers on through the target's reverse proxy, first route first.
     pub urls: Vec<String>,
+    /// Resources the service reads with `resource:<name>.<field>`, its own and shared ones,
+    /// by their name in its spec.
+    pub resources: BTreeMap<String, ResourceValues>,
+}
+
+/// What a service can read from one resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceValues {
+    pub api: ResourceApi,
+    /// Field → value. Fields without a value (`endpoint` on AWS itself) are left out, and
+    /// env vars reading them are not set.
+    pub fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +223,33 @@ fn direct_value(s: &ServiceInput, var: &EnvVar) -> Option<Resolved> {
     })
 }
 
+/// Resolves `resource:<name>.<field>` from the service's own resources; `None` when the
+/// field has no value for this backend.
+fn resolve_resource(s: &ServiceInput, name: &str, field: &str) -> Result<Option<Resolved>, String> {
+    let r = s.resources.get(name).ok_or_else(|| {
+        format!(
+            "resource `{name}` is not recorded for `{}`; check `ikit res list`",
+            s.instance.name
+        )
+    })?;
+    let secret = r.api.field(field).ok_or_else(|| {
+        format!(
+            "{} resource `{name}` has no field `{field}` (fields: {})",
+            r.api,
+            r.api
+                .fields()
+                .iter()
+                .map(|(f, _)| *f)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    Ok(r.fields.get(field).map(|value| Resolved {
+        value: value.clone(),
+        secret,
+    }))
+}
+
 /// Resolves `service:<name>.host | .port | .port.<port name> | .env.<VAR> | .url`. `<name>` is a
 /// service instance, or a registry service if exactly one instance uses it. A `.host` must
 /// be on a network that a service in `from` joins.
@@ -350,13 +390,21 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                     direct_value(s, var)
                 }
                 Some(reference) => {
-                    Some(resolve_ref(reference, inst.group, &input.services).map_err(
-                        |message| RenderError::Env {
-                            service: inst.name.clone(),
-                            var: var.name.clone(),
-                            message,
-                        },
-                    )?)
+                    let env_error = |message| RenderError::Env {
+                        service: inst.name.clone(),
+                        var: var.name.clone(),
+                        message,
+                    };
+                    match parse_reference(reference) {
+                        Some(parsed) => {
+                            let (name, field) = parsed.map_err(env_error)?;
+                            resolve_resource(s, name, field).map_err(env_error)?
+                        }
+                        None => Some(
+                            resolve_ref(reference, inst.group, &input.services)
+                                .map_err(env_error)?,
+                        ),
+                    }
                 }
                 None => direct_value(s, var),
             };
@@ -675,12 +723,14 @@ pub(crate) mod tests {
                     spec: pg_spec,
                     secrets: BTreeMap::from([("POSTGRES_PASSWORD".into(), "pa$$word".into())]),
                     urls: vec![],
+                    resources: BTreeMap::new(),
                 },
                 ServiceInput {
                     instance: api,
                     spec: api_spec,
                     secrets: BTreeMap::new(),
                     urls: vec![],
+                    resources: BTreeMap::new(),
                 },
             ],
             zerotier: None,
@@ -882,6 +932,75 @@ pub(crate) mod tests {
         assert!(
             c["services"][ZT_SIDECAR].get("networks").is_none(),
             "the sidecar stays on the host network"
+        );
+    }
+
+    #[test]
+    fn resource_references_render_with_secrets_apart() {
+        let mut input = sample();
+        let api = &mut input.services[1];
+        let var = |name: &str, from: &str| EnvVar {
+            name: name.into(),
+            from: Some(from.into()),
+            ..Default::default()
+        };
+        api.spec.env.extend([
+            var("SQS_QUEUE_URL", "resource:jobs.url"),
+            var("AWS_ENDPOINT_URL", "resource:jobs.endpoint"),
+            var("AWS_SECRET_ACCESS_KEY", "resource:jobs.secret_access_key"),
+        ]);
+        api.resources.insert(
+            "jobs".into(),
+            ResourceValues {
+                api: ResourceApi::Sqs,
+                fields: BTreeMap::from([
+                    (
+                        "url".into(),
+                        "https://sqs.ap-south-1.amazonaws.com/1/q".into(),
+                    ),
+                    ("secret_access_key".into(), "s3cr$t".into()),
+                ]),
+            },
+        );
+        let r = render(&input).unwrap();
+        let c = yaml(&r.compose);
+        let env = &c["services"]["orders-api"]["environment"];
+        assert_eq!(
+            env["SQS_QUEUE_URL"],
+            "https://sqs.ap-south-1.amazonaws.com/1/q"
+        );
+        assert!(
+            env.get("AWS_ENDPOINT_URL").is_none(),
+            "no endpoint on AWS itself"
+        );
+        assert!(env.get("AWS_SECRET_ACCESS_KEY").is_none());
+        let secrets = yaml(&r.secrets);
+        assert_eq!(
+            secrets["services"]["orders-api"]["environment"]["AWS_SECRET_ACCESS_KEY"],
+            "s3cr$$t"
+        );
+
+        // A field the API doesn't have, and a resource the service doesn't have.
+        input.services[1]
+            .spec
+            .env
+            .push(var("BAD", "resource:jobs.bucket"));
+        assert!(
+            render(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("no field `bucket`")
+        );
+        input.services[1].spec.env.pop();
+        input.services[1]
+            .spec
+            .env
+            .push(var("BAD", "resource:assets.name"));
+        assert!(
+            render(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("ikit res list")
         );
     }
 

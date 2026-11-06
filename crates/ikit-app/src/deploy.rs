@@ -46,6 +46,9 @@ pub struct DeployPlan {
     /// The workload's site on the target's reverse proxy, if it has routes (or had).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge: Option<crate::EdgePlan>,
+    /// Buckets and queues `apply` creates before deploying.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<crate::ResourcePlan>,
     #[serde(skip)]
     pub rendered: Rendered,
 }
@@ -54,6 +57,7 @@ impl DeployPlan {
     /// Whether `apply` would do anything.
     pub fn needs_apply(&self) -> bool {
         !self.plan.is_empty()
+            || !self.resources.is_empty()
             || self.status != WorkloadStatus::Applied
             || self.edge.as_ref().is_some_and(|e| !e.changes.is_empty())
             || self
@@ -366,6 +370,7 @@ impl App {
         let detail = self.workload_show(workload).await?;
         let mut route_publishes = self.route_publishes(&detail.workload).await?;
         let mut urls = self.route_urls(workload).await?;
+        let mut resources = self.resource_inputs(&detail.workload).await?;
         let mut specs = BTreeMap::new();
         for entry in self.store.registry().list().await? {
             specs.extend(entry.versions.into_iter().map(|v| (v.id, v.spec)));
@@ -393,6 +398,7 @@ impl App {
             let spec = specs.remove(&instance.version_id).unwrap_or_default();
             services.push(ServiceInput {
                 urls: urls.remove(&instance.name).unwrap_or_default(),
+                resources: resources.remove(&instance.name).unwrap_or_default(),
                 instance,
                 spec,
                 secrets,
@@ -453,6 +459,8 @@ impl App {
         blockers.extend(self.docker_network_blockers(&wl, &place).await?);
         let (edge, edge_blockers) = self.edge_plan(&wl, &target).await?;
         blockers.extend(edge_blockers);
+        let (resources, resource_blockers) = self.resource_plans(&wl).await?;
+        blockers.extend(resource_blockers);
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -461,6 +469,7 @@ impl App {
             hooks,
             blockers,
             edge,
+            resources,
             rendered,
         })
     }
@@ -555,6 +564,7 @@ impl App {
         }
         if plan.plan != expected.plan
             || plan.rendered != expected.rendered
+            || plan.resources != expected.resources
             || plan.edge.as_ref().map(|e| &e.changes) != expected.edge.as_ref().map(|e| &e.changes)
         {
             return Err(AppError::Invalid(format!(
@@ -574,6 +584,12 @@ impl App {
         let run_id = self.store.workloads().start_run(wl.id, run).await?;
 
         let outcome = async {
+            // Resources first: services read their names and URLs from the compose file.
+            let rendered = if self.ensure_resources(wl).await?.is_empty() {
+                plan.rendered.clone()
+            } else {
+                self.render_workload(&wl.name).await?
+            };
             let mut ran = self
                 .run_phase(
                     wl,
@@ -584,10 +600,9 @@ impl App {
                     None,
                 )
                 .await?;
-            self.write_files(&place, &plan.rendered).await?;
+            self.write_files(&place, &rendered).await?;
             let logins = self.store.registry().logins().await?;
-            let hosts: std::collections::BTreeSet<String> = plan
-                .rendered
+            let hosts: std::collections::BTreeSet<String> = rendered
                 .images
                 .iter()
                 .map(|i| compose::image_registry(i))
@@ -1154,7 +1169,9 @@ mod tests {
         let plan = app.deploy_plan("wl-acme-dev-001").await.unwrap();
         app.deploy_apply(&plan, "test", false).await.unwrap();
         assert!(
-            app.workload_remove("wl-acme-dev-001").await.is_err(),
+            app.workload_remove("wl-acme-dev-001", crate::ResourcePolicy::Refuse)
+                .await
+                .is_err(),
             "applied workloads must be destroyed first"
         );
 
@@ -1171,7 +1188,9 @@ mod tests {
             calls.iter().any(|c| c.ends_with("down --remove-orphans")),
             "{calls:?}"
         );
-        app.workload_remove("wl-acme-dev-001").await.unwrap();
+        app.workload_remove("wl-acme-dev-001", crate::ResourcePolicy::Refuse)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1434,7 +1453,9 @@ mod tests {
                 .ends_with("/secret")
         );
 
-        app.workload_remove("wl-acme-dev-001").await.unwrap();
+        app.workload_remove("wl-acme-dev-001", crate::ResourcePolicy::Refuse)
+            .await
+            .unwrap();
         assert_eq!(
             crate::SecretStore::get(secrets.as_ref(), key).unwrap(),
             None,
@@ -1701,6 +1722,274 @@ mod tests {
         .unwrap();
         let err = app.backup_restore(latest.id, "test").await.unwrap_err();
         assert!(err.to_string().contains("checksum"), "{err}");
+    }
+
+    const SIM_REGISTRY: &str = r#"
+services:
+  - name: sim
+    category: platform
+    versions:
+      - version: 1.0.0
+        image: ghcr.io/acme/sim:1.0.0
+        needs:
+          - {name: assets, api: s3}
+          - {name: jobs, api: sqs, options: {visibility_timeout: 300, dead_letter: {max_receive: 10}}}
+        env:
+          - {name: STORAGE_BUCKET, from: "resource:assets.name"}
+          - {name: SQS_QUEUE_URL, from: "resource:jobs.url"}
+          - {name: AWS_REGION, from: "resource:jobs.region"}
+          - {name: AWS_ENDPOINT_URL, from: "resource:jobs.endpoint"}
+          - {name: AWS_SECRET_ACCESS_KEY, from: "resource:jobs.secret_access_key"}
+  - name: sim-worker
+    category: platform
+    versions:
+      - version: 1.0.0
+        image: ghcr.io/acme/sim-worker:1.0.0
+        needs:
+          - {name: jobs, use: sim.jobs}
+        env:
+          - {name: SQS_QUEUE_URL, from: "resource:jobs.url"}
+"#;
+
+    /// [`setup`] plus `sim` and `sim-worker` (sharing sim's queue) in the platform group,
+    /// and an aws profile `acme` with static keys. No backends yet.
+    async fn setup_sim() -> (
+        tempfile::TempDir,
+        App,
+        Arc<FakeDocker>,
+        Arc<crate::resources::tests::FakeDriver>,
+    ) {
+        let (dir, app, docker) = setup().await;
+        let driver = Arc::new(crate::resources::tests::FakeDriver::default());
+        let app = app.with_resource_driver(driver.clone());
+        let file: ikit_core::registry::RegistryFile =
+            serde_yaml_ng::from_str(SIM_REGISTRY).unwrap();
+        app.registry_import(&file, ikit_core::registry::ImportMode::Merge)
+            .await
+            .unwrap();
+        app.profile_add(crate::AddProfile {
+            kind: ikit_core::ProfileKind::Aws,
+            name: "acme".into(),
+            values: [
+                ("region", "ap-south-1"),
+                ("access_key_id", "AKIATEST"),
+                ("secret_access_key", "s3cret"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+        })
+        .await
+        .unwrap();
+        let req = |registry: &str| ServiceRequest {
+            name: None,
+            registry: registry.into(),
+            constraint: "latest".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        app.services_add("wl-acme-dev-001", vec![req("sim"), req("sim-worker")])
+            .await
+            .unwrap();
+        (dir, app, docker, driver)
+    }
+
+    async fn add_backends(app: &App) {
+        for (name, api) in [
+            ("aws-s3", ikit_core::ResourceApi::S3),
+            ("aws-sqs", ikit_core::ResourceApi::Sqs),
+        ] {
+            app.resource_backend_add(crate::NewBackendRequest {
+                name: name.into(),
+                api,
+                provider: ikit_core::ResourceProvider::Aws,
+                profile: Some("acme".into()),
+                options: Default::default(),
+            })
+            .await
+            .unwrap();
+            app.resource_bind_env("dev", name).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resources_are_created_on_apply_and_passed_to_services() {
+        let (_dir, app, _docker, driver) = setup_sim().await;
+        let wl = "wl-acme-dev-001";
+        let listed = app.resources_list(Some(wl)).await.unwrap();
+        let addresses: Vec<String> = listed.iter().map(|r| r.resource.address()).collect();
+        assert_eq!(addresses, ["sim.assets", "sim.jobs"]);
+        assert_eq!(listed[1].used_by, ["sim-worker"]);
+        assert!(
+            listed[0]
+                .resource
+                .external_id
+                .starts_with("wl-acme-dev-001-sim-assets-")
+        );
+        let spec =
+            std::fs::read_to_string(app.org().dir.join("workloads").join(format!("{wl}.yaml")))
+                .unwrap();
+        assert!(spec.contains("id: wl-acme-dev-001-sim-jobs"), "{spec}");
+
+        // No backend bound: plan says so, apply refuses.
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|b| b.contains("sim.jobs needs a sqs backend")),
+            "{:?}",
+            plan.blockers
+        );
+        assert!(app.deploy_apply(&plan, "test", false).await.is_err());
+
+        add_backends(&app).await;
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert_eq!(plan.resources.len(), 2);
+        assert_eq!(plan.resources[1].backend.as_deref(), Some("aws-sqs"));
+        let compose = &plan.rendered.compose;
+        assert!(
+            compose.contains(&listed[0].resource.external_id),
+            "{compose}"
+        );
+        assert!(
+            compose.contains(crate::PENDING_VALUE),
+            "queue URL is only known after apply"
+        );
+        assert!(compose.contains("AWS_REGION: ap-south-1"));
+        assert!(
+            !compose.contains("AWS_ENDPOINT_URL"),
+            "AWS itself has no endpoint"
+        );
+        assert!(!compose.contains("s3cret") && plan.rendered.secrets.contains("s3cret"));
+
+        let report = app.deploy_apply(&plan, "test", false).await.unwrap();
+        let written =
+            std::fs::read_to_string(app.org().dir.join("deploy").join(wl).join(COMPOSE_FILE))
+                .unwrap();
+        let url = "https://sqs.test/1/wl-acme-dev-001-sim-jobs";
+        assert_eq!(
+            written.matches(url).count(),
+            2,
+            "sim and sim-worker get the real URL: {written}"
+        );
+        assert!(!written.contains(crate::PENDING_VALUE));
+        assert_eq!(report.plan.resources.len(), 2);
+        {
+            let items = driver.items.lock().unwrap();
+            let (_, outputs) = &items["wl-acme-dev-001-sim-jobs"];
+            assert_eq!(outputs["tag ikit:service"], "sim");
+            assert!(outputs.contains_key("dlq_url"));
+        }
+        let jobs = app.resource_show(wl, "sim.jobs").await.unwrap().resource;
+        assert_eq!(jobs.status, ikit_core::ResourceStatus::Ready);
+        assert_eq!(jobs.backend.as_deref(), Some("aws-sqs"));
+        assert_eq!(jobs.outputs["url"], url);
+
+        // Nothing left to do; the applied files match.
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(!plan.needs_apply(), "{:?}", plan.plan);
+
+        // A created resource outlives its service, and blocks `wl rm` until dealt with.
+        app.services_remove(wl, &["sim-worker".into(), "sim".into()])
+            .await
+            .unwrap();
+        let jobs = app.resource_show(wl, "sim.jobs").await.unwrap().resource;
+        assert!(jobs.orphaned);
+        assert!(
+            app.resource_bind(wl, "sim.jobs", "aws-sqs").await.is_err(),
+            "it already exists"
+        );
+        assert!(app.resource_backend_remove("aws-sqs").await.is_err());
+        app.deploy_destroy(wl, false, "test").await.unwrap();
+        let err = app
+            .workload_remove(wl, crate::ResourcePolicy::Refuse)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("--delete-resources"), "{err}");
+        assert!(app.resource_remove(wl, "sim.jobs", false).await.unwrap());
+        assert!(
+            !driver
+                .items
+                .lock()
+                .unwrap()
+                .contains_key("wl-acme-dev-001-sim-jobs")
+        );
+        app.workload_remove(wl, crate::ResourcePolicy::Delete)
+            .await
+            .unwrap();
+        assert!(driver.items.lock().unwrap().is_empty());
+        app.resource_unbind_env("dev", ikit_core::ResourceApi::Sqs)
+            .await
+            .unwrap();
+        app.resource_backend_remove("aws-sqs").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adopted_and_failed_resources() {
+        let (_dir, app, _docker, driver) = setup_sim().await;
+        let wl = "wl-acme-dev-001";
+        add_backends(&app).await;
+        // An existing queue, adopted by URL.
+        let existing = crate::resources::Want {
+            api: ikit_core::ResourceApi::Sqs,
+            name: "acme-dev-simulation-jobs",
+            options: &Default::default(),
+            tags: &BTreeMap::new(),
+        };
+        crate::resources::ResourceDriver::ensure(driver.as_ref(), &existing)
+            .await
+            .unwrap();
+        let r = app
+            .resource_adopt(
+                wl,
+                "sim.jobs",
+                "https://sqs.test/1/acme-dev-simulation-jobs",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.external_id, "acme-dev-simulation-jobs");
+        assert_eq!(r.origin, ikit_core::ResourceOrigin::Adopted);
+        assert!(
+            app.resource_adopt(wl, "sim.jobs", "acme-dev-simulation-jobs")
+                .await
+                .is_err()
+        );
+        assert!(
+            app.resource_adopt(wl, "sim.assets", "no-such-bucket")
+                .await
+                .is_err()
+        );
+
+        // Creating the bucket fails: the run fails, the bucket stays pending and is retried.
+        let bucket = app
+            .resource_show(wl, "sim.assets")
+            .await
+            .unwrap()
+            .resource
+            .external_id;
+        driver.fail.lock().unwrap().insert(bucket.clone());
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert_eq!(plan.resources.len(), 1, "the adopted queue exists already");
+        assert!(app.deploy_apply(&plan, "test", false).await.is_err());
+        let assets = app.resource_show(wl, "sim.assets").await.unwrap().resource;
+        assert_eq!(assets.status, ikit_core::ResourceStatus::Pending);
+        assert_eq!(
+            app.workload_get(wl).await.unwrap().status,
+            WorkloadStatus::Failed
+        );
+        driver.fail.lock().unwrap().clear();
+        let plan = app.deploy_plan(wl).await.unwrap();
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+
+        // Removing the workload keeps the adopted queue either way.
+        app.deploy_destroy(wl, false, "test").await.unwrap();
+        app.workload_remove(wl, crate::ResourcePolicy::Delete)
+            .await
+            .unwrap();
+        let items = driver.items.lock().unwrap();
+        assert!(items.contains_key("acme-dev-simulation-jobs"));
+        assert!(!items.contains_key(&bucket));
     }
 
     #[tokio::test]

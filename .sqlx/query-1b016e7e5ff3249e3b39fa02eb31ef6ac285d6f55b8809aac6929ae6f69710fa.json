@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.env, b.api, r.name AS backend\n               FROM resource_bindings b JOIN resource_backends r ON r.id = b.backend_id\n               ORDER BY b.env, b.api",
+  "describe": {
+    "columns": [
+      {
+        "name": "env",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "api",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "backend",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1b016e7e5ff3249e3b39fa02eb31ef6ac285d6f55b8809aac6929ae6f69710fa"
+}

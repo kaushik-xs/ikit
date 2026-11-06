@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM resource_bindings WHERE env = ? AND api = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "effddbaecdff3fdfd96b11d48d21843744d0b08ec5ae3e70af16a5e1cf910b37"
+}

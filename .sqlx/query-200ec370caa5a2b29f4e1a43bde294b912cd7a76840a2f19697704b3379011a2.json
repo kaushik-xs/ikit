@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO resource_bindings (env, api, backend_id) VALUES (?, ?, ?)\n               ON CONFLICT (env, api) DO UPDATE SET backend_id = excluded.backend_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "200ec370caa5a2b29f4e1a43bde294b912cd7a76840a2f19697704b3379011a2"
+}

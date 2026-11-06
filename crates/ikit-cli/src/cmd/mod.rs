@@ -10,6 +10,7 @@ pub mod net;
 pub mod org;
 pub mod profile;
 pub mod registry;
+pub mod resource;
 pub mod route;
 pub mod service;
 pub mod storage;

@@ -141,6 +141,10 @@ enum Command {
     /// Route domains to the workload's services through the target's reverse proxy.
     #[command(subcommand)]
     Route(cmd::route::RouteCmd),
+    /// Buckets and queues services need, and the backends (AWS, or S3/SQS-compatible servers)
+    /// that provide them.
+    #[command(subcommand, name = "res", alias = "resource")]
+    Resource(cmd::resource::ResourceCmd),
     /// Manage individual services in a workload.
     #[command(subcommand, name = "svc", alias = "service")]
     Service(cmd::service::ServiceCmd),
@@ -280,6 +284,7 @@ async fn dispatch(ctx: &Ctx, command: Command) -> anyhow::Result<()> {
         Command::Mcp(c) => cmd::mcp::run(ctx, c).await,
         Command::Net(c) => cmd::net::run(ctx, c).await,
         Command::Route(c) => cmd::route::run(ctx, c).await,
+        Command::Resource(c) => cmd::resource::run(ctx, c).await,
         Command::Render => cmd::deploy::render(ctx).await,
         Command::Plan => cmd::deploy::plan(ctx).await,
         Command::Apply {

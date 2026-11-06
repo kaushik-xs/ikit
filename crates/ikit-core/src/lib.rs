@@ -47,6 +47,7 @@ pub mod network;
 pub mod profile;
 pub mod registry;
 pub mod remote;
+pub mod resource;
 pub mod storage;
 pub mod target;
 pub mod version;
@@ -66,6 +67,10 @@ pub use registry::{
     Category, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,
 };
 pub use remote::{Head, LockInfo, RemoteSpec};
+pub use resource::{
+    Backend, BackendOptions, Binding, Need, NeedOptions, Resource, ResourceApi, ResourceKind,
+    ResourceOrigin, ResourceProvider, ResourceStatus,
+};
 pub use storage::{Backup, Storage, StorageOptions, StorageProvider};
 pub use target::{Connection, Target, TargetKind, TargetStatus, ZtRoute};
 pub use version::{Dependency, VersionConstraint, VersionError};

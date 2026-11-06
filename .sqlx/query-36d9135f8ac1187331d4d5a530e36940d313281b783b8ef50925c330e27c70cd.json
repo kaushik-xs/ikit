@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workload_resources\n                   (workload_id, service, name, api, backend_id, external_id, outputs_json,\n                    origin, status, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "36d9135f8ac1187331d4d5a530e36940d313281b783b8ef50925c330e27c70cd"
+}

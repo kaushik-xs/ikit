@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE workload_resources\n               SET backend_id = ?, external_id = ?, outputs_json = ?, origin = ?, status = ?,\n                   orphaned = ?, updated_at = ?\n               WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "ce0636f5acd7263f1af4fcba8bd3c789e0706bdf7f5bb00ba02fbb45e5e070d2"
+}

@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO resource_backends (name, api, provider, profile, options_json, created_at)\n               VALUES (?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", name, api, provider, profile,\n                         options_json AS \"options_json: Json<BackendOptions>\",\n                         created_at AS \"created_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "api",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "provider",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "options_json: Json<BackendOptions>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ff89c36be945494870cc3659ab8c46d595e24bce05f9dd337829917d95152f68"
+}

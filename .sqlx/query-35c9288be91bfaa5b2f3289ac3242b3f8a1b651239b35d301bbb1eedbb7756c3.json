@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id AS \"id!\", w.name AS workload, r.service, r.name, r.api,\n                      b.name AS \"backend?\", r.external_id,\n                      r.outputs_json AS \"outputs_json: Json<BTreeMap<String, String>>\",\n                      r.origin, r.status, r.orphaned,\n                      r.created_at AS \"created_at: DateTime<Utc>\",\n                      r.updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM workload_resources r\n               JOIN workloads w ON w.id = r.workload_id\n               LEFT JOIN resource_backends b ON b.id = r.backend_id\n               WHERE ?1 IS NULL OR r.workload_id = ?1\n               ORDER BY w.name, r.service, r.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "workload",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "service",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "api",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "backend?",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "external_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "outputs_json: Json<BTreeMap<String, String>>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "orphaned",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "35c9288be91bfaa5b2f3289ac3242b3f8a1b651239b35d301bbb1eedbb7756c3"
+}

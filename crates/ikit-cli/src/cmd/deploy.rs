@@ -230,6 +230,14 @@ fn print_plan(p: &DeployPlan) {
         "changes"
     };
     println!("Plan for {} on {} ({header}):", p.workload, p.target);
+    for r in &p.resources {
+        let kind = r.api.kind();
+        let on = r.backend.as_deref().unwrap_or("no backend yet");
+        println!(
+            "  + {kind:<6} {}  ({} via {on}, for {})",
+            r.external_id, r.api, r.resource
+        );
+    }
     if p.plan.is_empty() {
         if p.status != ikit_core::WorkloadStatus::Applied {
             println!(

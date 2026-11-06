@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use crate::resource::{Need, parse_reference};
 use crate::version::{Dependency, VersionConstraint, parse_version};
 
 string_enum! {
@@ -44,6 +45,9 @@ pub struct ServiceSpec {
     pub resources: Option<Resources>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<Dependency>,
+    /// Buckets, queues, … the service needs; created per workload by `ikit apply`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<Need>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +157,39 @@ impl ServiceSpec {
                 return Err(format!(
                     "default of `{}` is not one of its allowed values",
                     e.name
+                ));
+            }
+        }
+        let mut needs = BTreeSet::new();
+        for n in &self.needs {
+            n.validate()?;
+            if !needs.insert(&n.name) {
+                return Err(format!("resource `{}` is declared twice", n.name));
+            }
+        }
+        for e in &self.env {
+            let Some(reference) = e.from.as_deref().and_then(parse_reference) else {
+                continue;
+            };
+            let (name, field) = reference.map_err(|m| format!("env var `{}`: {m}", e.name))?;
+            let need = self.needs.iter().find(|n| n.name == name).ok_or_else(|| {
+                format!(
+                    "env var `{}` reads resource `{name}`, which is not in `needs`",
+                    e.name
+                )
+            })?;
+            // A `use` need's API is only known in a workload; checked when rendering.
+            if let Some(api) = need.api
+                && api.field(field).is_none()
+            {
+                return Err(format!(
+                    "env var `{}`: {api} resource `{name}` has no field `{field}` (fields: {})",
+                    e.name,
+                    api.fields()
+                        .iter()
+                        .map(|(f, _)| *f)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
@@ -271,6 +308,8 @@ pub struct VersionDef {
     pub resources: Option<Resources>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<Dependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<Need>,
 }
 
 impl VersionDef {
@@ -282,6 +321,7 @@ impl VersionDef {
             healthcheck,
             resources,
             depends_on,
+            needs,
         } = spec;
         Self {
             version,
@@ -295,6 +335,7 @@ impl VersionDef {
             healthcheck,
             resources,
             depends_on,
+            needs,
         }
     }
 
@@ -306,6 +347,7 @@ impl VersionDef {
             healthcheck: self.healthcheck.clone(),
             resources: self.resources.clone(),
             depends_on: self.depends_on.clone(),
+            needs: self.needs.clone(),
         }
     }
 }
@@ -544,5 +586,31 @@ services:
         assert!(is_moving_tag("localhost:5000/nginx"));
         assert!(!is_moving_tag("localhost:5000/nginx:1.27"));
         assert!(!is_moving_tag("nginx@sha256:abc"));
+    }
+
+    #[test]
+    fn resource_references_must_match_needs() {
+        let spec = |yaml: &str| {
+            serde_yaml_ng::from_str::<ServiceSpec>(yaml)
+                .unwrap()
+                .validate()
+        };
+        assert!(
+            spec("{needs: [{name: jobs, api: sqs}], env: [{name: Q, from: 'resource:jobs.url'}]}")
+                .is_ok()
+        );
+        // A shared resource's API is only known in a workload.
+        assert!(
+            spec("{needs: [{name: jobs, use: sim.jobs}], env: [{name: Q, from: 'resource:jobs.whatever'}]}")
+                .is_ok()
+        );
+        for bad in [
+            "{env: [{name: Q, from: 'resource:jobs.url'}]}",
+            "{needs: [{name: jobs, api: sqs}], env: [{name: Q, from: 'resource:jobs.bucket'}]}",
+            "{needs: [{name: jobs, api: sqs}], env: [{name: Q, from: 'resource:jobs'}]}",
+            "{needs: [{name: jobs, api: sqs}, {name: jobs, api: s3}]}",
+        ] {
+            assert!(spec(bad).is_err(), "{bad}");
+        }
     }
 }

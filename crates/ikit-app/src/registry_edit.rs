@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use ikit_core::registry::{EnvVar, Port, ServiceDef, VersionDef, Volume};
-use ikit_core::{Category, Dependency, RegistryEntry, RegistryVersion};
+use ikit_core::{Category, Dependency, Need, RegistryEntry, RegistryVersion};
 use semver::Version;
 use serde::Serialize;
 
@@ -51,10 +51,13 @@ pub struct VersionChanges {
     pub env: Vec<EnvVar>,
     pub volumes: Vec<Volume>,
     pub depends_on: Vec<Dependency>,
+    /// Resources, upserted by name.
+    pub needs: Vec<Need>,
     pub remove_ports: Vec<u16>,
     pub remove_env: Vec<String>,
     pub remove_volumes: Vec<String>,
     pub remove_depends_on: Vec<String>,
+    pub remove_needs: Vec<String>,
 }
 
 impl VersionChanges {
@@ -71,6 +74,8 @@ impl VersionChanges {
             && self.remove_env.is_empty()
             && self.remove_volumes.is_empty()
             && self.remove_depends_on.is_empty()
+            && self.needs.is_empty()
+            && self.remove_needs.is_empty()
     }
 }
 
@@ -211,6 +216,12 @@ impl App {
             "dependency on",
             |d| d.name.clone(),
         )?;
+        remove(&mut def.needs, &c.remove_needs, "resource", |n| {
+            n.name.clone()
+        })?;
+        for n in c.needs {
+            upsert(&mut def.needs, n, |n| n.name.clone());
+        }
         for mut var in c.env {
             // Keep schema details the flags cannot express.
             if let Some(existing) = def.env.iter().find(|e| e.name == var.name) {

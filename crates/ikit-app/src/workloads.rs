@@ -42,6 +42,29 @@ struct SpecService<'a> {
     env: &'a BTreeMap<String, String>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     secrets: &'a [String],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    resources: BTreeMap<String, SpecResource>,
+}
+
+#[derive(Serialize)]
+struct SpecResource {
+    api: ikit_core::ResourceApi,
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+    status: ikit_core::ResourceStatus,
+}
+
+/// What `ikit wl rm` does with the buckets and queues ikit created for the workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResourcePolicy {
+    /// Refuse while any exist.
+    #[default]
+    Refuse,
+    /// Delete them at their backends.
+    Delete,
+    /// Forget them and leave them where they are.
+    Keep,
 }
 
 fn not_found(name: &str) -> AppError {
@@ -111,13 +134,33 @@ impl App {
     }
 
     /// Removes a workload definition, its keychain secrets and its spec file.
-    pub async fn workload_remove(&self, name: &str) -> Result<()> {
+    pub async fn workload_remove(&self, name: &str, resources: ResourcePolicy) -> Result<()> {
         let detail = self.workload_show(name).await?;
         if detail.workload.status != ikit_core::WorkloadStatus::Draft {
             return Err(AppError::Invalid(format!(
                 "{name} is {}; tear it down first with `ikit destroy --wl {name}`",
                 detail.workload.status
             )));
+        }
+        let created = self.created_resources(&detail.workload).await?;
+        match resources {
+            ResourcePolicy::Refuse if !created.is_empty() => {
+                return Err(AppError::InUse {
+                    what: name.to_owned(),
+                    by: vec![format!(
+                        "resources ikit created: {} (pass --delete-resources to delete them, or --keep-resources to leave them)",
+                        created
+                            .iter()
+                            .map(|r| format!("{} ({})", r.address(), r.external_id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )],
+                });
+            }
+            ResourcePolicy::Refuse | ResourcePolicy::Keep => {
+                self.forget_resources(&detail.workload, true).await?;
+            }
+            ResourcePolicy::Delete => self.forget_resources(&detail.workload, false).await?,
         }
         for key in self.hook_secret_keys(name).await? {
             self.secrets.delete(&key)?;
@@ -138,8 +181,26 @@ impl App {
     }
 
     /// Rewrites `workloads/<name>.yaml` from the state database.
+    /// Also records resources the services now need, and orphans ones they no longer do.
     pub(crate) async fn write_spec(&self, name: &str) -> Result<()> {
         let detail = self.workload_show(name).await?;
+        self.sync_resources(&detail.workload).await?;
+        let mut resources: BTreeMap<String, BTreeMap<String, SpecResource>> = BTreeMap::new();
+        for info in self.resources_list(Some(name)).await? {
+            let r = &info.resource;
+            if r.orphaned {
+                continue;
+            }
+            resources.entry(r.service.clone()).or_default().insert(
+                r.name.clone(),
+                SpecResource {
+                    api: r.api,
+                    id: r.external_id.clone(),
+                    backend: info.backend().map(str::to_owned),
+                    status: r.status,
+                },
+            );
+        }
         let mut groups: BTreeMap<Category, Vec<SpecService>> = BTreeMap::new();
         for s in &detail.services {
             groups.entry(s.group).or_default().push(SpecService {
@@ -150,6 +211,7 @@ impl App {
                 image: &s.image,
                 env: &s.env,
                 secrets: &s.secret_env,
+                resources: resources.remove(&s.name).unwrap_or_default(),
             });
         }
         let w = &detail.workload;
@@ -204,7 +266,9 @@ mod tests {
             Err(AppError::NotFound(_))
         ));
 
-        app.workload_remove("wl-acme-dev-001").await.unwrap();
+        app.workload_remove("wl-acme-dev-001", crate::ResourcePolicy::Refuse)
+            .await
+            .unwrap();
         assert_eq!(app.current_workload().unwrap(), None);
         assert!(!app.org().workload_spec("wl-acme-dev-001").exists());
         assert_eq!(

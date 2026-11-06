@@ -486,7 +486,7 @@ impl App {
     }
 
     /// `(instance, registry service, version, spec)` for each service.
-    async fn specs_for(
+    pub(crate) async fn specs_for(
         &self,
         services: &[ServiceInstance],
     ) -> Result<Vec<(String, String, Version, ServiceSpec)>> {

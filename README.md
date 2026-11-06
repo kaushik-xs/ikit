@@ -118,6 +118,18 @@ ikit route add admin --tls internal                # host from edge.host_templat
 ikit route redirect www.acme.com https://acme.com
 ikit route auto on --groups app                    # a route per app service with an `http` port
 ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
+
+ikit res backend add aws-s3 --api s3 --profile acme --region eu-central-1
+ikit res backend add elasticmq --api sqs --endpoint http://elasticmq.lan:9324   # SQS-compatible
+ikit res backend bind dev aws-s3 elasticmq         # where dev workloads' buckets and queues go
+ikit registry version set sim 1.0.0 --need jobs:sqs:visibility_timeout=300,dead_letter=10 \
+  --env-from SQS_QUEUE_URL=resource:jobs.url        # the service declares what it needs
+ikit registry version set sim-worker 1.0.0 --need jobs=sim.jobs   # shares sim's queue
+ikit res list [--all] | show sim.jobs              # created by the next `ikit apply`
+ikit res bind sim.jobs aws-sqs                     # this one elsewhere (before it exists)
+ikit res adopt sim.assets acme-dev-simulation-b88b643e   # use an existing bucket or queue
+ikit res rm sim.jobs [--keep]                      # after `ikit svc rm sim`
+ikit wl rm wl-acme-dev-002 --delete-resources      # or --keep-resources
 ```
 
 ### Backups
@@ -129,6 +141,29 @@ ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
   `aws` profile can hold keys itself or name a profile in `~/.aws/credentials` with
   `--set aws_profile=<name>` (static keys only; SSO and assume-role profiles are not supported).
 - `backup schedule` prints a crontab line; ikit never edits your crontab.
+
+### Resources
+
+Design and later phases: [docs/resources.md](docs/resources.md).
+
+- A registry version lists the buckets (`s3`) and queues (`sqs`) its service `needs`, and env vars
+  read them with `from: resource:<name>.<field>`: `name`, `url`, `arn`, `region`, `endpoint`,
+  `dlq_url` (queues), and the backend's `access_key_id` / `secret_access_key`, which go to the
+  secrets file. A need with `use: <service>.<resource>` shares another service's resource.
+- Adding the service records each resource as pending, named `<workload>-<service>-<resource>`
+  (buckets get a random suffix; their names are global). `ikit plan` lists what it will create;
+  values only known afterwards (a queue's URL) show as `<created by ikit apply>`.
+- `ikit apply` creates pending resources on their backend before deploying, tagged `ikit:org`,
+  `ikit:workload`, `ikit:service` and `ikit:resource`, and records each as soon as it exists.
+  A queue with `dead_letter` gets `<queue>-dlq`. Creating is safe to repeat.
+- Backends belong to the org and provide one API: `--provider aws` is AWS itself, or any
+  S3- or SQS-compatible server (RustFS, MinIO, Garage, ElasticMQ) with `--endpoint`, which the
+  target must reach too. Credentials come from the backend's `aws` profile, as for storages.
+- An env's binding picks the backend for its workloads' new resources; `res bind` overrides one
+  resource. Once a resource exists it stays on its backend.
+- Removing a service orphans its resources; `res rm` deletes one (a bucket must be empty) or,
+  with `--keep`, forgets it. Adopted resources are never deleted, only forgotten. `wl rm` is
+  refused while resources ikit created exist, unless `--delete-resources` or `--keep-resources`.
 
 ### Remote state
 

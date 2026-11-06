@@ -30,6 +30,7 @@ mod registry_auth;
 mod registry_edit;
 mod registry_ops;
 mod remote;
+mod resources;
 mod routes;
 pub mod secrets;
 mod services;
@@ -51,6 +52,12 @@ pub use hooks::{HookOutcome, HookPlan, HookRequest, NewHookRequest};
 pub use init::{InitReport, OrgInit, init};
 pub use mcp_config::McpConfig;
 pub use mcp_tokens::{McpToken, mcp_token_verify};
+pub use org_secrets::{
+    IDENTITY_ENV, IdentityOptions, SecretsCheck, SecretsInfo, SecretsInitReport, SecretsRecipient,
+    SecretsScope, identity_create, identity_generate, identity_public, org_secret_store,
+    org_uses_secrets_file, secrets_check, secrets_grant, secrets_info, secrets_merge,
+    secrets_revoke, secrets_split,
+};
 pub use orgs::{
     NewOrg, OrgSummary, find_org_for_workload, org_config, org_create, org_list, org_remove,
     org_show, org_use,
@@ -60,23 +67,20 @@ pub use profiles::AddProfile;
 pub use registry::{AddVersion, Outdated, RegistryFilter};
 pub use registry_edit::{ServiceChanges, VersionChanges, VersionUpdate};
 pub use registry_ops::{ImageRef, SyncReport};
-pub use org_secrets::{
-    IDENTITY_ENV, IdentityOptions, SecretsCheck, SecretsInfo, SecretsInitReport,
-    SecretsRecipient, SecretsScope, identity_create, identity_generate, identity_public,
-    org_secret_store, org_uses_secrets_file, secrets_check, secrets_grant, secrets_info,
-    secrets_merge, secrets_revoke, secrets_split,
-};
 pub use remote::{
     HistoryEntry, PullReport, Remote, RemoteOverrides, RemoteStatus, RestoreReport, Session,
     SessionOptions, SyncOutcome, org_clone, org_history, org_lock_info, org_pull, org_restore,
     org_status, org_unlock, remote_rm, remote_spec,
+};
+pub use resources::{
+    NewBackendRequest, PENDING_VALUE, ResourceInfo, ResourcePlan, UNBOUND_VALUE, parse_address,
 };
 pub use routes::{RouteList, RouteRequest};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore};
 pub use services::{AddServicesReport, ServiceRequest, UnmetDependency};
 pub use storage::{NewStorageRequest, ObjectEntry};
 pub use targets::ZtSsh;
-pub use workloads::{SPEC_HEADER, WorkloadDetail};
+pub use workloads::{ResourcePolicy, SPEC_HEADER, WorkloadDetail};
 pub use zerotier::{ZtJoin, ZtNetworkDetail, ZtNode};
 
 pub type Result<T, E = AppError> = std::result::Result<T, E>;
@@ -88,6 +92,8 @@ pub struct App {
     store: Arc<dyn StateStore>,
     secrets: Arc<dyn SecretStore>,
     exec: Arc<dyn Exec>,
+    /// Replaces every backend's driver; used by tests.
+    resource_driver: Option<Arc<dyn resources::ResourceDriver>>,
 }
 
 impl App {
@@ -126,12 +132,23 @@ impl App {
             store,
             secrets,
             exec: Arc::new(SystemExec),
+            resource_driver: None,
         }
     }
 
     /// Replaces how external commands (ssh, docker, kubectl) are run; used by tests.
     pub fn with_exec(mut self, exec: Arc<dyn Exec>) -> Self {
         self.exec = exec;
+        self
+    }
+
+    /// Creates resources through `driver` instead of each backend's own; used by tests.
+    #[cfg(test)]
+    pub(crate) fn with_resource_driver(
+        mut self,
+        driver: Arc<dyn resources::ResourceDriver>,
+    ) -> Self {
+        self.resource_driver = Some(driver);
         self
     }
 
@@ -289,9 +306,20 @@ pub(crate) mod testing {
         ) -> Result<Json<Value>, StatusCode> {
             authed(h)?;
             let mut db = db.lock().unwrap();
-            let m = db.members.get_mut(&(id, node)).ok_or(StatusCode::NOT_FOUND)?;
-            m["status"] = json!(if authorized { "authorized" } else { "not_authorized" });
-            m["ipv4Assignments"] = json!(if authorized { vec!["10.147.17.5"] } else { vec![] });
+            let m = db
+                .members
+                .get_mut(&(id, node))
+                .ok_or(StatusCode::NOT_FOUND)?;
+            m["status"] = json!(if authorized {
+                "authorized"
+            } else {
+                "not_authorized"
+            });
+            m["ipv4Assignments"] = json!(if authorized {
+                vec!["10.147.17.5"]
+            } else {
+                vec![]
+            });
             Ok(Json(m.clone()))
         }
 
@@ -300,40 +328,66 @@ pub(crate) mod testing {
                 "/network-group",
                 get(|h: HeaderMap| async move {
                     authed(&h)?;
-                    Ok::<_, StatusCode>(Json(json!({ "items": [{ "id": "g1", "name": "default" }] })))
+                    Ok::<_, StatusCode>(Json(
+                        json!({ "items": [{ "id": "g1", "name": "default" }] }),
+                    ))
                 }),
             )
             .route(
                 "/network-group/{group}/network",
-                post(|State(db): State<Shared>, h: HeaderMap, Json(body): Json<Value>| async move {
-                    authed(&h)?;
-                    let mut db = db.lock().unwrap();
-                    let id = format!("8056c2e21c{:06x}", db.networks.len() + 1);
-                    let net = json!({ "id": id, "name": body["name"], "config": body["config"] });
-                    db.networks.insert(id, net.clone());
-                    Ok::<_, StatusCode>(Json(net))
-                }),
+                post(
+                    |State(db): State<Shared>, h: HeaderMap, Json(body): Json<Value>| async move {
+                        authed(&h)?;
+                        let mut db = db.lock().unwrap();
+                        let id = format!("8056c2e21c{:06x}", db.networks.len() + 1);
+                        let net =
+                            json!({ "id": id, "name": body["name"], "config": body["config"] });
+                        db.networks.insert(id, net.clone());
+                        Ok::<_, StatusCode>(Json(net))
+                    },
+                ),
             )
             .route(
                 "/network/{id}",
-                get(|State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
-                    authed(&h)?;
-                    db.lock().unwrap().networks.get(&id).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
-                })
-                .delete(|State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
-                    authed(&h)?;
-                    db.lock().unwrap().networks.remove(&id).map(|_| Json(json!({}))).ok_or(StatusCode::NOT_FOUND)
-                }),
+                get(
+                    |State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
+                        authed(&h)?;
+                        db.lock()
+                            .unwrap()
+                            .networks
+                            .get(&id)
+                            .cloned()
+                            .map(Json)
+                            .ok_or(StatusCode::NOT_FOUND)
+                    },
+                )
+                .delete(
+                    |State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
+                        authed(&h)?;
+                        db.lock()
+                            .unwrap()
+                            .networks
+                            .remove(&id)
+                            .map(|_| Json(json!({})))
+                            .ok_or(StatusCode::NOT_FOUND)
+                    },
+                ),
             )
             .route(
                 "/network/{id}/member",
-                get(|State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
-                    authed(&h)?;
-                    let db = db.lock().unwrap();
-                    let members: Vec<Value> =
-                        db.members.iter().filter(|((n, _), _)| *n == id).map(|(_, m)| m.clone()).collect();
-                    Ok::<_, StatusCode>(Json(members))
-                })
+                get(
+                    |State(db): State<Shared>, h: HeaderMap, Path(id): Path<String>| async move {
+                        authed(&h)?;
+                        let db = db.lock().unwrap();
+                        let members: Vec<Value> = db
+                            .members
+                            .iter()
+                            .filter(|((n, _), _)| *n == id)
+                            .map(|(_, m)| m.clone())
+                            .collect();
+                        Ok::<_, StatusCode>(Json(members))
+                    },
+                )
                 .post(
                     |State(db): State<Shared>,
                      h: HeaderMap,
@@ -362,7 +416,13 @@ pub(crate) mod testing {
                      h: HeaderMap,
                      Path((id, node)): Path<(String, String)>| async move {
                         authed(&h)?;
-                        db.lock().unwrap().members.get(&(id, node)).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
+                        db.lock()
+                            .unwrap()
+                            .members
+                            .get(&(id, node))
+                            .cloned()
+                            .map(Json)
+                            .ok_or(StatusCode::NOT_FOUND)
                     },
                 )
                 .post(
@@ -372,7 +432,10 @@ pub(crate) mod testing {
                      Json(body): Json<Value>| async move {
                         authed(&h)?;
                         let mut db = db.lock().unwrap();
-                        let m = db.members.get_mut(&(id, node)).ok_or(StatusCode::NOT_FOUND)?;
+                        let m = db
+                            .members
+                            .get_mut(&(id, node))
+                            .ok_or(StatusCode::NOT_FOUND)?;
                         if let Some(n) = body["name"].as_str() {
                             m["name"] = json!(n);
                         }
@@ -400,7 +463,7 @@ pub(crate) mod testing {
                     },
                 ),
             )
-        .with_state(Shared::default());
+            .with_state(Shared::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -413,10 +476,14 @@ pub(crate) mod testing {
         app.profile_add(crate::AddProfile {
             kind: ikit_core::ProfileKind::Zerotier,
             name: "zt".into(),
-            values: [("api_url", url.as_str()), ("api_token", "secret"), ("org_id", "org1")]
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect(),
+            values: [
+                ("api_url", url.as_str()),
+                ("api_token", "secret"),
+                ("org_id", "org1"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
         })
         .await
         .unwrap();

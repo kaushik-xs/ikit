@@ -1,6 +1,6 @@
 use anyhow::bail;
 use clap::Subcommand;
-use ikit_app::WorkloadDetail;
+use ikit_app::{ResourcePolicy, WorkloadDetail};
 use inquire::Select;
 
 use crate::output::{Output, print_json, table};
@@ -43,6 +43,12 @@ pub enum WorkloadCmd {
         name: String,
         #[arg(long, short)]
         yes: bool,
+        /// Also delete the buckets and queues ikit created for it (a bucket must be empty).
+        #[arg(long, conflicts_with = "keep_resources")]
+        delete_resources: bool,
+        /// Leave the buckets and queues ikit created where they are, and forget them.
+        #[arg(long)]
+        keep_resources: bool,
     },
 }
 
@@ -154,12 +160,27 @@ pub async fn run(ctx: &Ctx, cmd: WorkloadCmd) -> anyhow::Result<()> {
             };
             return super::deploy::runs(&ctx, limit).await;
         }
-        WorkloadCmd::Rm { name, yes } => {
+        WorkloadCmd::Rm {
+            name,
+            yes,
+            delete_resources,
+            keep_resources,
+        } => {
+            let (policy, also) = if delete_resources {
+                (
+                    ResourcePolicy::Delete,
+                    ", and delete the buckets and queues ikit created for it",
+                )
+            } else if keep_resources {
+                (ResourcePolicy::Keep, "")
+            } else {
+                (ResourcePolicy::Refuse, "")
+            };
             if ctx.confirm(
-                &format!("Remove workload {name}, its services and their keychain secrets?"),
+                &format!("Remove workload {name}, its services and their keychain secrets{also}?"),
                 yes,
             )? {
-                app.workload_remove(&name).await?;
+                app.workload_remove(&name, policy).await?;
                 if ctx.output == Output::Table {
                     println!("Removed {name}.");
                 }

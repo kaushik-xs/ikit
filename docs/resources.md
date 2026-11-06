@@ -1,6 +1,17 @@
 # Service resources (design)
 
-Status: proposal, November 2026. Nothing here is implemented yet.
+Status: phase 1 implemented (November 2026): S3 buckets and SQS queues through the `aws`
+provider, which also covers S3- and SQS-compatible servers at an `endpoint`. Phases 2 and 3 are
+still proposals. Where phase 1 differs from the first draft of this design:
+
+- The registry key is `needs`, not `resources`: a version's `resources` already holds CPU and
+  memory limits.
+- Backends and env bindings live in `state.db` (like storages), not `config.yaml`, and are
+  managed with `ikit res backend add|list|show|rm|bind|unbind`.
+- A need with `use` has no row of its own; it resolves to the owning service's resource when
+  rendering. Adding the user without the owner is allowed; `plan` fails until the owner is there.
+- Resources whose backend isn't known yet don't fail `sg add`: `plan` shows a blocker instead.
+- External self-hosted servers (phase 3) work already, as `aws` backends with `--endpoint`.
 
 A service often needs more than a container: a bucket for its files, a queue for its jobs, a
 database of its own. Today ikit leaves these to the operator. This design lets a registry service
@@ -57,14 +68,14 @@ translate SQS into AMQP.
 
 ## Declaring resources in the registry
 
-A version's spec gets a `resources` list, next to `env` and `depends_on`. Env vars reach a
+A version's spec gets a `needs` list, next to `env` and `depends_on`. Env vars reach a
 resource with `from: resource:<name>.<field>`, the same way `from: service:postgres.host` reaches
 another service today (`resolve_ref` in `crates/ikit-provider/src/compose/render.rs` grows a
 `resource:` branch).
 
 ```yaml
 # simulation-service 0.0.0
-resources:
+needs:
   - name: assets
     kind: bucket
     api: s3
@@ -87,14 +98,13 @@ own. The worker shares the service's queue and bucket:
 
 ```yaml
 # simulation-worker 0.0.0
-resources:
+needs:
   - { name: assets, use: simulation-service.assets }
   - { name: jobs,   use: simulation-service.jobs }
 ```
 
 `use` resolves like `service:` references: an instance name, or a registry service with exactly
-one instance in the workload. Adding the worker without the service fails the same way a missing
-`depends_on` does, and `--with-deps` adds it.
+one instance in the workload. Without the owner in the workload, `plan` fails and names it.
 
 Fields each API exposes:
 
@@ -114,71 +124,69 @@ point one service at something ikit doesn't manage.
 
 ## Backends and bindings
 
-Backends are defined per org in `config.yaml`, managed with `ikit res backend add|rm|list`:
+Backends belong to the org and are kept in `state.db`:
 
-```yaml
-resources:
-  backends:
-    aws-s3:    { api: s3,  provider: aws, profile: acme, region: ap-south-1 }
-    aws-sqs:   { api: sqs, provider: aws, profile: acme, region: ap-south-1 }
-    rustfs:    { api: s3,  provider: rustfs,    mode: in-workload }
-    elasticmq: { api: sqs, provider: elasticmq, mode: in-workload }
-    nas-minio: { api: s3,  provider: minio, endpoint: https://minio.lan:9000, profile: nas }
-  bind:
-    dev:  { s3: rustfs, sqs: elasticmq }
-    prod: { s3: aws-s3, sqs: aws-sqs }
+```sh
+ikit res backend add aws-s3    --api s3  --profile acme --region ap-south-1
+ikit res backend add aws-sqs   --api sqs --profile acme --region ap-south-1
+ikit res backend add nas-minio --api s3  --profile nas  --endpoint https://minio.lan:9000
+ikit res backend bind dev  nas-minio aws-sqs
+ikit res backend bind prod aws-s3 aws-sqs
 ```
 
-- `provider` picks the driver. `profile` reuses the existing provider profiles (`aws`, `azure`,
-  `gcp`); credentials still come from the keychain, `org.age`, or a named `~/.aws` profile.
-- `mode: in-workload` means the backend runs as a data service in each workload that needs it.
-  ikit adds that service (from the registry, like any other) when the first resource bound to it
-  is added. `mode: external` (the default) is a backend that already exists somewhere.
-- `bind` picks a backend per env and API. A workload overrides one resource with
-  `ikit res bind <service>.<resource> <backend>`; with no binding for an API, adding the service
-  asks which backend to use (or fails with `--no-input`).
+- `provider` picks the driver; phase 1 has `aws`, which with `--endpoint` talks to any S3- or
+  SQS-compatible server. `profile` reuses the existing `aws` profiles: keys on the profile, a
+  named `~/.aws` profile, or the environment when omitted.
+- An env's binding picks the backend per API for its workloads' new resources. A workload
+  overrides one resource with `ikit res bind <service>.<resource> <backend>` while it is pending.
+- Later, `mode: in-workload` (phase 2): the backend runs as a data service in each workload that
+  needs it, added from the registry when the first resource bound to it is added.
 
 The existing `storages` table stays for backups and remote state. A storage could later name a
 bucket backend instead of its own provider settings; that is out of scope here.
 
 ## State
 
-Two new tables in `state.db`, so resources travel with remote state like everything else:
+Three new tables in `state.db` (migration `0013_resources.sql`), so resources travel with remote
+state like everything else:
 
 ```text
-resource_backends   id, name, api, provider, mode, profile, options_json, created_at
-workload_resources  id, workload_id, service, name, kind, api, backend_id,
-                    use_of (nullable: the resource this one shares),
-                    external_id   (bucket name, queue URL, database name),
-                    outputs_json  (non-secret fields: arn, region, endpoint, dlq_url),
+resource_backends   id, name, api, provider, profile, options_json {region, endpoint}, created_at
+resource_bindings   env, api, backend_id
+workload_resources  id, workload_id, service, name, api,
+                    backend_id    (NULL until `res bind` or the first apply picks one),
+                    external_id   (bucket or queue name),
+                    outputs_json  (non-secret fields only known once it exists: url, arn, dlq_url),
                     origin        ('created' | 'adopted'),
-                    status        ('pending' | 'ready' | 'failed' | 'orphaned'),
+                    status        ('pending' | 'ready'),
+                    orphaned      (its service no longer needs it),
                     created_at, updated_at
 ```
 
-Secret outputs (access keys, passwords, AMQP URLs with credentials) go to the org's secret store
-under `org/<org>/workload/<wl>/resource/<service>.<name>`, alongside the existing per-service
-keys, so they land in `secrets/org.age` for orgs that use it.
+Region, endpoint and credentials are read from the backend and its profile when rendering, so
+they always match the backend; phase 1 stores no per-resource secrets. Per-service credentials
+(later) would go to the org's secret store under `org/<org>/workload/<wl>/resource/<service>.<name>`.
 
-`workloads/<wl>.yaml` gets a `resources:` section per service, so the generated spec shows what
-each service is wired to.
+`workloads/<wl>.yaml` gets a `resources:` map per service (id, backend, status), so the generated
+spec shows what each service is wired to.
 
 ## Lifecycle
 
 | command | what happens to resources |
 |---|---|
-| `ikit sg add` / `svc …` | Records resources as `pending` with their binding. Creates nothing yet. |
-| `ikit plan` | Lists resources to create, adopt or orphan, next to the compose changes: `+ queue wl-acme-dev-002-simulation-service-jobs (sqs via aws-sqs)`. |
-| `ikit apply` | Ensures every resource (create if missing, check settings if present), stores outputs, then renders compose with the resolved values. Idempotent: re-running creates nothing new. |
+| `ikit sg add` / `svc …` | Records resources as `pending`. Creates nothing yet. |
+| `ikit plan` | Lists resources to create next to the compose changes: `+ queue wl-acme-dev-002-simulation-service-jobs (sqs via aws-sqs, for simulation-service.jobs)`. Values only known after creation render as `<created by ikit apply>`; a resource with no backend is a blocker. |
+| `ikit apply` | Creates pending resources (or brings an existing one with that name in line), records each as soon as it exists, then renders compose with the real values. Safe to repeat. |
 | `ikit svc rm` | Marks the service's own resources `orphaned`; nothing is deleted. |
 | `ikit destroy` | Leaves resources alone: buckets and queues hold data. |
-| `ikit wl rm` | Refused while the workload has resources ikit created, unless `--delete-resources` (asks per resource; `--yes` for all) or `--keep-resources` (forgets them, leaves them in place). |
+| `ikit wl rm` | Refused while the workload has resources ikit created, unless `--delete-resources` or `--keep-resources` (forgets them, leaves them in place). |
 | `ikit res list` / `show` | Resources of a workload or the org, with backend, status and origin. |
 | `ikit res adopt <svc>.<name> <id>` | Records an existing bucket/queue/database (`origin: adopted`). Adopted resources are never deleted by ikit, only forgotten. |
-| `ikit res rm <svc>.<name>` | Deletes one orphaned or unwanted resource, after confirming. |
+| `ikit res rm <svc>.<name> [--keep]` | Deletes one orphaned resource (a bucket must be empty), or with `--keep` forgets it. |
+| `ikit res bind <svc>.<name> <backend>` | Puts a pending resource on another backend than the env's. |
 
-Drift (`ikit status --drift`) also reports resources that are recorded but missing, or whose settings
-(visibility timeout, DLQ) differ from the spec.
+Later: drift (`ikit status --drift`) also reports resources that are recorded but missing, or
+whose settings (visibility timeout, DLQ) differ from the spec.
 
 With remote state, every command that creates or deletes a resource is a write: it holds the org
 lock, so two SREs applying at once cannot create two queues for one service. If an apply fails
@@ -248,7 +256,7 @@ In-workload drivers return their work as an init service for the renderer instea
 `kind: database, api: postgres` replaces per-service database hooks like `create-platform-dbs`:
 
 ```yaml
-resources:
+needs:
   - { name: db, kind: database, api: postgres }
 env:
   - { name: DATABASE_URL, from: "resource:db.url", secret: true }
@@ -260,27 +268,37 @@ existing RDS instance named by the backend (creating RDS instances themselves is
 
 ## Phases
 
-1. **Core model with AWS.** Registry `resources`, `from: resource:`, `use`, the two tables,
+1. **Core model with AWS** (done). Registry `needs`, `from: resource:`, `use`, the tables,
    backends and bindings, `plan`/`apply`/`wl rm` handling, a new `ikit res` command
-   (`list|show|adopt|rm|bind|backend`),
-   S3 buckets and SQS queues (with DLQ) on AWS, tags, phase-1 credentials.
+   (`list|show|adopt|rm|bind|backend`), S3 buckets (with versioning) and SQS queues (with DLQ)
+   on AWS or a compatible server, tags, phase-1 credentials.
 2. **Self-hosted.** In-workload backends with init services: RustFS (or MinIO) for `s3`,
    ElasticMQ for `sqs`; `database`/`postgres` on the workload's postgres; retire
    `create-platform-dbs`.
-3. **More providers and APIs.** Azure Blob and GCS, `amqp` on RabbitMQ, external self-hosted
-   backends, per-service scoped credentials, drift for resource settings.
+3. **More providers and APIs.** Azure Blob and GCS, `amqp` on RabbitMQ, per-service scoped
+   credentials, drift for resource settings. (External S3/SQS-compatible servers already work.)
 
 ## Example: the simulation services in phase 1
 
 ```sh
-ikit res backend add aws-s3  --api s3  --provider aws --profile acme --region ap-south-1
-ikit res backend add aws-sqs --api sqs --provider aws --profile acme --region ap-south-1
-ikit res bind --env dev s3=aws-s3 sqs=aws-sqs
+ikit res backend add aws-s3  --api s3  --profile acme --region ap-south-1
+ikit res backend add aws-sqs --api sqs --profile acme --region ap-south-1
+ikit res backend bind dev aws-s3 aws-sqs
+
+# Once per registry version: what the services need, and which env vars read it.
+ikit registry version set simulation-service 0.0.0 \
+  --need assets:s3 --need jobs:sqs:visibility_timeout=300,dead_letter=10 \
+  --env-from STORAGE_BUCKET=resource:assets.name --env-from SQS_QUEUE_URL=resource:jobs.url \
+  --env-from AWS_ACCESS_KEY_ID=resource:jobs.access_key_id \
+  --env-from AWS_SECRET_ACCESS_KEY=resource:jobs.secret_access_key
+ikit registry version set simulation-worker 0.0.0 \
+  --need assets=simulation-service.assets --need jobs=simulation-service.jobs \
+  --env-from STORAGE_BUCKET=resource:assets.name --env-from SQS_QUEUE_URL=resource:jobs.url
 
 ikit sg add platform --services simulation-service,simulation-worker --wl wl-acme-dev-002
 ikit plan
-#  + bucket wl-acme-dev-002-simulation-service-assets-7f3k2a  (s3 via aws-s3)
-#  + queue  wl-acme-dev-002-simulation-service-jobs           (sqs via aws-sqs, dlq)
+#  + bucket wl-acme-dev-002-simulation-service-assets-7f3k2a  (s3 via aws-s3, for simulation-service.assets)
+#  + queue  wl-acme-dev-002-simulation-service-jobs  (sqs via aws-sqs, for simulation-service.jobs)
 #  + simulation-service   ghcr.io/acme/simulation-service:latest
 #  + simulation-worker    ghcr.io/acme/simulation-worker:latest
 ikit apply

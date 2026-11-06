@@ -12,6 +12,7 @@ use crate::cmd::net::{DockerCmd, NetCmd, ZtCmd};
 use crate::cmd::org::{OrgCmd, SecretsCmd};
 use crate::cmd::profile::ProfileCmd;
 use crate::cmd::registry::RegistryCmd;
+use crate::cmd::resource::{BackendCmd, ResourceCmd};
 use crate::cmd::route::RouteCmd;
 use crate::cmd::service::ServiceCmd;
 use crate::cmd::storage::StorageCmd;
@@ -165,6 +166,21 @@ impl Command {
                 | RouteCmd::Redirect { .. }
                 | RouteCmd::Unredirect { .. }
                 | RouteCmd::Auto(_) => Write,
+            },
+            Command::Resource(c) => match c {
+                ResourceCmd::List { .. }
+                | ResourceCmd::Show { .. }
+                | ResourceCmd::Backend(BackendCmd::List | BackendCmd::Show { .. }) => Read,
+                // Adopting and removing reach the backend; all of these change the state.
+                ResourceCmd::Bind { .. }
+                | ResourceCmd::Adopt { .. }
+                | ResourceCmd::Rm { .. }
+                | ResourceCmd::Backend(
+                    BackendCmd::Add { .. }
+                    | BackendCmd::Rm { .. }
+                    | BackendCmd::Bind { .. }
+                    | BackendCmd::Unbind { .. },
+                ) => Write,
             },
             Command::Render | Command::Plan | Command::Status { .. } => Read,
             Command::Apply { .. } | Command::Destroy { .. } => Write,

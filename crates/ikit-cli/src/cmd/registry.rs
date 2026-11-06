@@ -9,7 +9,7 @@ use ikit_core::registry::{
     is_moving_tag,
 };
 use ikit_core::version::parse_version;
-use ikit_core::{Category, Dependency, RegistryEntry, ServiceSpec};
+use ikit_core::{Category, Dependency, Need, NeedOptions, RegistryEntry, ResourceApi, ServiceSpec};
 use semver::Version;
 
 use crate::output::{Output, print_json, table};
@@ -132,6 +132,15 @@ pub struct SpecArgs {
     /// Dependency: SERVICE[@CONSTRAINT], e.g. postgres@^16 (repeatable).
     #[arg(long = "depends-on", value_name = "SERVICE[@CONSTRAINT]")]
     depends_on: Vec<Dependency>,
+    /// Resource the service needs, created per workload: NAME:API[:OPTION,...] with API s3 or
+    /// sqs, e.g. jobs:sqs:visibility_timeout=300,dead_letter=10 or assets:s3:versioning;
+    /// or NAME=SERVICE.RESOURCE to share another service's (repeatable).
+    #[arg(long = "need", value_name = "NAME:API[:OPTIONS]", value_parser = parse_need)]
+    needs: Vec<Need>,
+    /// Env var filled from a reference: NAME=resource:<name>.<field> (or service:…), e.g.
+    /// SQS_QUEUE_URL=resource:jobs.url (repeatable).
+    #[arg(long = "env-from", value_name = "NAME=REFERENCE")]
+    env_from: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -189,6 +198,8 @@ pub struct VersionSetArgs {
     remove_volumes: Vec<String>,
     #[arg(long = "remove-depends-on", value_name = "SERVICE")]
     remove_depends_on: Vec<String>,
+    #[arg(long = "remove-need", value_name = "NAME")]
+    remove_needs: Vec<String>,
     /// Skip the confirmation when workloads use this version.
     #[arg(long, short)]
     yes: bool,
@@ -201,9 +212,11 @@ impl SpecArgs {
             && self.secret_env.is_empty()
             && self.volumes.is_empty()
             && self.depends_on.is_empty()
+            && self.needs.is_empty()
+            && self.env_from.is_empty()
     }
 
-    fn into_spec(self) -> ServiceSpec {
+    fn into_spec(self) -> anyhow::Result<ServiceSpec> {
         let mut env: Vec<EnvVar> = self
             .env
             .into_iter()
@@ -226,13 +239,24 @@ impl SpecArgs {
             secret: true,
             ..Default::default()
         }));
-        ServiceSpec {
+        for e in self.env_from {
+            let Some((name, reference)) = e.split_once('=') else {
+                bail!("--env-from takes NAME=REFERENCE, e.g. SQS_QUEUE_URL=resource:jobs.url");
+            };
+            env.push(EnvVar {
+                name: name.to_owned(),
+                from: Some(reference.to_owned()),
+                ..Default::default()
+            });
+        }
+        Ok(ServiceSpec {
             ports: self.ports,
             env,
             volumes: self.volumes,
             depends_on: self.depends_on,
+            needs: self.needs,
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -333,7 +357,7 @@ pub async fn run(ctx: &Ctx, cmd: RegistryCmd) -> anyhow::Result<()> {
                 versions: vec![VersionDef::new(
                     args.version,
                     args.image,
-                    args.spec.into_spec(),
+                    args.spec.into_spec()?,
                 )],
             };
             render_entry(ctx, &app.registry_add(def).await?)?;
@@ -351,7 +375,7 @@ pub async fn run(ctx: &Ctx, cmd: RegistryCmd) -> anyhow::Result<()> {
             if from.is_some() && !spec.is_empty() {
                 bail!("pass either --from or spec flags, not both");
             }
-            let spec = (!spec.is_empty()).then(|| spec.into_spec());
+            let spec = (!spec.is_empty()).then(|| spec.into_spec()).transpose()?;
             let req = AddVersion {
                 version,
                 image,
@@ -416,6 +440,7 @@ pub async fn run(ctx: &Ctx, cmd: RegistryCmd) -> anyhow::Result<()> {
                 remove_ports,
                 remove_volumes,
                 remove_depends_on,
+                remove_needs,
                 yes,
             } = args;
             if let Some(image) = &image {
@@ -439,7 +464,7 @@ pub async fn run(ctx: &Ctx, cmd: RegistryCmd) -> anyhow::Result<()> {
             {
                 return Ok(());
             }
-            let spec = spec.into_spec();
+            let spec = spec.into_spec()?;
             let changes = VersionChanges {
                 image,
                 digest: clearable(digest),
@@ -449,10 +474,12 @@ pub async fn run(ctx: &Ctx, cmd: RegistryCmd) -> anyhow::Result<()> {
                 env: spec.env,
                 volumes: spec.volumes,
                 depends_on: spec.depends_on,
+                needs: spec.needs,
                 remove_ports,
                 remove_env,
                 remove_volumes,
                 remove_depends_on,
+                remove_needs,
             };
             let update = app
                 .registry_version_update(&name, &version, changes)
@@ -692,7 +719,12 @@ fn render_entry(ctx: &Ctx, e: &RegistryEntry) -> anyhow::Result<()> {
     t.add_row(vec!["source".to_owned(), s.source.to_string()]);
     println!("{t}");
 
-    let mut t = table(&["VERSION", "IMAGE", "PORTS", "ENV", "DEPENDS ON", "STATUS"]);
+    let with_needs = e.versions.iter().any(|v| !v.spec.needs.is_empty());
+    let mut headers = vec!["VERSION", "IMAGE", "PORTS", "ENV", "DEPENDS ON", "STATUS"];
+    if with_needs {
+        headers.insert(5, "NEEDS");
+    }
+    let mut t = table(&headers);
     for v in &e.versions {
         let ports: Vec<String> = v
             .spec
@@ -709,7 +741,9 @@ fn render_entry(ctx: &Ctx, e: &RegistryEntry) -> anyhow::Result<()> {
             .iter()
             .map(|e| {
                 let mut s = e.name.clone();
-                if e.secret {
+                if let Some(from) = &e.from {
+                    s.push_str(&format!(" ← {from}"));
+                } else if e.secret {
                     s.push_str(" (secret)");
                 } else if let Some(d) = &e.default {
                     s.push_str(&format!("={d}"));
@@ -720,14 +754,28 @@ fn render_entry(ctx: &Ctx, e: &RegistryEntry) -> anyhow::Result<()> {
             })
             .collect();
         let deps: Vec<String> = v.spec.depends_on.iter().map(ToString::to_string).collect();
-        t.add_row(vec![
+        let mut row = vec![
             v.version.to_string(),
             v.image.clone(),
             ports.join("\n"),
             env.join("\n"),
             deps.join("\n"),
             if v.deprecated { "deprecated" } else { "" }.to_owned(),
-        ]);
+        ];
+        if with_needs {
+            let needs: Vec<String> = v
+                .spec
+                .needs
+                .iter()
+                .map(|n| match (&n.uses, n.api) {
+                    (Some(u), _) => format!("{} = {u}", n.name),
+                    (None, Some(api)) => format!("{} ({api})", n.name),
+                    (None, None) => n.name.clone(),
+                })
+                .collect();
+            row.insert(5, needs.join("\n"));
+        }
+        t.add_row(row);
     }
     println!("{t}");
     Ok(())
@@ -785,10 +833,98 @@ fn parse_port(s: &str) -> Result<Port, String> {
     })
 }
 
+/// `NAME:API[:OPTION,...]` or `NAME=SERVICE.RESOURCE`.
+fn parse_need(s: &str) -> Result<Need, String> {
+    // Options contain `=` too, so the `:` after the name decides the form.
+    let shared = s.split_once('=').filter(|(name, _)| !name.contains(':'));
+    if let Some((name, uses)) = shared {
+        let need = Need {
+            name: name.to_owned(),
+            kind: None,
+            api: None,
+            uses: Some(uses.to_owned()),
+            options: NeedOptions::default(),
+        };
+        need.validate()?;
+        return Ok(need);
+    }
+    let mut parts = s.splitn(3, ':');
+    let name = parts.next().unwrap_or_default();
+    let api: ResourceApi = parts
+        .next()
+        .ok_or("expected NAME:API[:OPTIONS] or NAME=SERVICE.RESOURCE")?
+        .parse()
+        .map_err(|e: ikit_core::UnknownVariant| e.to_string())?;
+    let mut options = NeedOptions::default();
+    for opt in parts
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .filter(|o| !o.is_empty())
+    {
+        let (key, value) = opt.split_once('=').unwrap_or((opt, ""));
+        let number = || {
+            value
+                .parse::<u32>()
+                .map_err(|_| format!("option {key} takes a number, e.g. {key}=300"))
+        };
+        match key {
+            "visibility_timeout" => options.visibility_timeout = Some(number()?),
+            "retention" => options.retention = Some(number()?),
+            "dead_letter" => {
+                options.dead_letter = Some(ikit_core::resource::DeadLetter {
+                    max_receive: number()?,
+                })
+            }
+            "versioning" => options.versioning = true,
+            _ => {
+                return Err(format!(
+                    "unknown option `{key}` (visibility_timeout, retention, dead_letter, versioning)"
+                ));
+            }
+        }
+    }
+    let need = Need {
+        name: name.to_owned(),
+        kind: None,
+        api: Some(api),
+        uses: None,
+        options,
+    };
+    need.validate()?;
+    Ok(need)
+}
+
 fn parse_volume(s: &str) -> Result<Volume, String> {
     let (name, path) = s.split_once(':').ok_or("expected NAME:/PATH")?;
     Ok(Volume {
         name: name.to_owned(),
         path: path.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_needs() {
+        let n = parse_need("jobs:sqs:visibility_timeout=300,dead_letter=10").unwrap();
+        assert_eq!(n.api, Some(ResourceApi::Sqs));
+        assert_eq!(n.options.visibility_timeout, Some(300));
+        assert_eq!(n.options.dead_letter.unwrap().max_receive, 10);
+        let n = parse_need("assets:s3:versioning").unwrap();
+        assert!(n.options.versioning);
+        let n = parse_need("jobs=simulation-service.jobs").unwrap();
+        assert_eq!(n.uses.as_deref(), Some("simulation-service.jobs"));
+        for bad in [
+            "jobs",
+            "jobs:kafka",
+            "assets:s3:dead_letter=3",
+            "jobs:sqs:retention=x",
+            "jobs=nodot",
+        ] {
+            assert!(parse_need(bad).is_err(), "{bad}");
+        }
+    }
 }

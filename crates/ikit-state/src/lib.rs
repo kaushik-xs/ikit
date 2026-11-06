@@ -11,10 +11,12 @@ use ikit_core::registry::{
 use ikit_core::target::{Check, TargetOrigin};
 use ikit_core::{AutoRoutes, EdgeConfig, Redirect, Route, RouteOrigin, TlsMode};
 use ikit_core::{
-    Backup, Category, Connection, DockerNetwork, Hook, HookAction, HookPhase, HookRunRecord,
-    Network, NetworkOrigin, Profile, ProfileKind, PublishedPort, RegistryEntry, RegistryVersion,
-    Run, RunAction, RunResult, ServiceInstance, SqlEngine, Storage, StorageOptions,
-    StorageProvider, Target, TargetStatus, VersionConstraint, Workload, WorkloadStatus,
+    Backend, BackendOptions, Backup, Binding, Category, Connection, DockerNetwork, Hook,
+    HookAction, HookPhase, HookRunRecord, Network, NetworkOrigin, Profile, ProfileKind,
+    PublishedPort, RegistryEntry, RegistryVersion, Resource, ResourceApi, ResourceOrigin,
+    ResourceProvider, ResourceStatus, Run, RunAction, RunResult, ServiceInstance, SqlEngine,
+    Storage, StorageOptions, StorageProvider, Target, TargetStatus, VersionConstraint, Workload,
+    WorkloadStatus,
 };
 use semver::Version;
 
@@ -33,6 +35,7 @@ pub trait StateStore: Send + Sync {
     fn storage(&self) -> &dyn StorageRepo;
     fn networks(&self) -> &dyn NetworkRepo;
     fn edge(&self) -> &dyn EdgeRepo;
+    fn resources(&self) -> &dyn ResourceRepo;
 }
 
 #[async_trait]
@@ -166,6 +169,73 @@ pub trait StorageRepo: Send + Sync {
     /// Newest first, optionally for one workload and service.
     async fn backups(&self, workload: Option<&str>, service: Option<&str>) -> Result<Vec<Backup>>;
     async fn delete_backup(&self, id: i64) -> Result<bool>;
+}
+
+#[async_trait]
+pub trait ResourceRepo: Send + Sync {
+    /// Fails with `Conflict` on a taken name.
+    async fn insert_backend(&self, new: NewBackend<'_>) -> Result<Backend>;
+    async fn backend(&self, name: &str) -> Result<Option<Backend>>;
+    async fn backends(&self) -> Result<Vec<Backend>>;
+    /// Fails with `InUse` while a binding or a resource refers to it.
+    async fn delete_backend(&self, name: &str) -> Result<bool>;
+    async fn bindings(&self) -> Result<Vec<Binding>>;
+    /// Creates or replaces the env's binding for the backend's API. Fails with `NotFound`
+    /// for an unknown backend.
+    async fn bind(&self, env: &str, backend: &str) -> Result<Binding>;
+    async fn unbind(&self, env: &str, api: ResourceApi) -> Result<bool>;
+    /// Resources of one workload, or of every workload, ordered by workload, service, name.
+    async fn list(&self, workload_id: Option<i64>) -> Result<Vec<Resource>>;
+    /// Fails with `Conflict` if the service already has a resource with that name.
+    async fn insert(&self, workload_id: i64, new: NewResource<'_>) -> Result<Resource>;
+    /// Fails with `NotFound` for an unknown backend.
+    async fn update(&self, id: i64, update: ResourceUpdate<'_>) -> Result<()>;
+    async fn delete(&self, id: i64) -> Result<bool>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewBackend<'a> {
+    pub name: &'a str,
+    pub api: ResourceApi,
+    pub provider: ResourceProvider,
+    pub profile: Option<&'a str>,
+    pub options: &'a BackendOptions,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewResource<'a> {
+    pub service: &'a str,
+    pub name: &'a str,
+    pub api: ResourceApi,
+    pub backend: Option<&'a str>,
+    pub external_id: &'a str,
+    pub outputs: &'a BTreeMap<String, String>,
+    pub origin: ResourceOrigin,
+    pub status: ResourceStatus,
+}
+
+/// Every mutable field of a resource; callers start from the current [`Resource`].
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceUpdate<'a> {
+    pub backend: Option<&'a str>,
+    pub external_id: &'a str,
+    pub outputs: &'a BTreeMap<String, String>,
+    pub origin: ResourceOrigin,
+    pub status: ResourceStatus,
+    pub orphaned: bool,
+}
+
+impl<'a> From<&'a Resource> for ResourceUpdate<'a> {
+    fn from(r: &'a Resource) -> Self {
+        Self {
+            backend: r.backend.as_deref(),
+            external_id: &r.external_id,
+            outputs: &r.outputs,
+            origin: r.origin,
+            status: r.status,
+            orphaned: r.orphaned,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

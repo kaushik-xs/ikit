@@ -372,7 +372,9 @@ mod tests {
             org_remove(&paths, "acme", secrets.as_ref()).await,
             Err(AppError::Invalid(_))
         ));
-        app.workload_remove("wl-acme-dev-001").await.unwrap();
+        app.workload_remove("wl-acme-dev-001", crate::ResourcePolicy::Refuse)
+            .await
+            .unwrap();
         drop(app);
         org_remove(&paths, "acme", secrets.as_ref()).await.unwrap();
         assert!(!paths.org("acme").dir.exists());
