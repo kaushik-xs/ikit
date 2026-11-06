@@ -164,8 +164,8 @@ workload_resources  id, workload_id, service, name, api,
 ```
 
 Region, endpoint and credentials are read from the backend and its profile when rendering, so
-they always match the backend; phase 1 stores no per-resource secrets. Per-service credentials
-(later) would go to the org's secret store under `org/<org>/workload/<wl>/resource/<service>.<name>`.
+they always match the backend; phase 1 stores no per-resource secrets. Per-service keys (phase
+1.5) add a `service_identities` table; see [Credentials](#credentials).
 
 `workloads/<wl>.yaml` gets a `resources:` map per service (id, backend, status), so the generated
 spec shows what each service is wired to.
@@ -242,14 +242,107 @@ In-workload drivers return their work as an init service for the renderer instea
 
 ## Credentials
 
-- **Phase 1**: one key pair per backend. For `aws` backends it is the profile's own credentials
-  (or a named `~/.aws` profile); for self-hosted ones, a key ikit generates for the backend. The
-  `access_key_id` and `secret_access_key` fields resolve to it. This matches what services do by
-  hand today.
-- **Later**: per-service scoped credentials. For AWS, an IAM user (or role, for targets with
-  instance roles) whose policy allows only that service's bucket and queue ARNs; for RustFS and
-  MinIO, a user with a policy on its buckets. Services don't change: the same
-  `resource:jobs.access_key_id` reference resolves to the scoped key instead.
+- **Phase 1** (done): one key pair per backend, the credentials of its `aws` profile (keys on the
+  profile, or a named `~/.aws` profile). The `access_key_id` and `secret_access_key` fields
+  resolve to them. Simple, but every service on the backend gets the same keys, and they are
+  usually the keys ikit provisions with, which can do far more than any service should.
+- **Phase 1.5** (next): per-service credentials on AWS, below.
+- **Later**: the same for self-hosted backends (RustFS and MinIO users and policies). ElasticMQ
+  has no authentication, so services there keep the backend's keys.
+
+### Per-service credentials (phase 1.5)
+
+On a backend with per-service keys, ikit creates an IAM user for each service that has resources
+on it, allows that user exactly those resources, creates its access key and keeps the key in the
+org's secret store. `resource:<name>.access_key_id` and `.secret_access_key` resolve to the
+service's own key instead of the backend's, so registry specs don't change.
+
+```sh
+ikit res backend add aws-sqs --api sqs --profile regere --region ap-south-1 \
+  --per-service-keys --boundary arn:aws:iam::123456789012:policy/ikit-regere-boundary
+ikit res backend set aws-s3 --per-service-keys --boundary <arn>   # an existing backend
+ikit res backend iam-policy aws-sqs   # the boundary and provisioning policies to apply yourself
+```
+
+**Who a user is for.** One IAM user per workload service and AWS account: a service with a bucket
+and a queue on two backends of the same account gets one user covering both. The user covers the
+service's own resources and the ones it shares with `use` (the worker gets the service's queue),
+and adopted resources too: ikit only ever changes its users' policies, never a bucket or queue
+policy. An adopted resource named outside the org's prefix (say `new-app-dev-…`) is also outside
+the boundary below, so the user can't reach it until the boundary lists it; `iam-policy` prints
+the boundary with the org's adopted resources included, and `plan` warns about ones missing.
+
+**Names, path and tags.** User `<workload>-<service>` (cut to IAM's 64 characters with a short
+hash when longer) under the path `/ikit/<org>/`, tagged `ikit:org`, `ikit:workload` and
+`ikit:service`. Everything ikit creates in IAM is under that path.
+
+**The user's policy.** One inline policy, `ikit-resources`, rewritten on each apply from the
+service's resources:
+
+| api | actions | on |
+|---|---|---|
+| `s3` | `s3:ListBucket`, `s3:GetBucketLocation` | the bucket |
+| `s3` | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload` | `<bucket>/*` |
+| `sqs` | `sqs:SendMessage`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl` | the queue and its `-dlq` |
+
+**The safeguard: a permissions boundary.** Creating users with policies is a privilege-escalation
+path: an identity that can do it can make itself an admin. So per-service keys require a
+permissions boundary, and every user ikit creates carries it:
+
+- The boundary caps any ikit user at the S3 and SQS actions above, on resources named after the
+  org's workloads (`arn:aws:s3:::<prefix>-*`, `arn:aws:sqs:<region>:<account>:<prefix>-*`, with
+  `<prefix>` the org's workload prefix, e.g. `wl-regere`). Whatever ikit (or a bug, or a stolen
+  provisioning key) puts in a user's policy, the user can't exceed it.
+- The provisioning identity (the backend's profile) is allowed IAM actions only on
+  `arn:aws:iam::<account>:user/ikit/<org>/*`, and `iam:CreateUser`, `iam:PutUserPolicy` and
+  `iam:DeleteUserPolicy` only with the condition `iam:PermissionsBoundary` = the boundary's ARN.
+  It is denied `iam:DeleteUserPermissionsBoundary` and `iam:PutUserPermissionsBoundary`.
+- ikit doesn't create or change these two policies: `ikit res backend iam-policy <backend>` prints
+  them for the account, region and prefix, to apply with Terraform/OpenTofu or the console.
+  `ikit res backend test <backend>` checks the provisioning identity can do what it needs.
+
+The provisioning identity needs: `iam:GetUser`, `iam:CreateUser`, `iam:TagUser`,
+`iam:DeleteUser`, `iam:PutUserPolicy`, `iam:DeleteUserPolicy`, `iam:ListUserPolicies`,
+`iam:CreateAccessKey`, `iam:DeleteAccessKey`, `iam:ListAccessKeys`, scoped as above, plus what
+creating the resources needs (`s3:CreateBucket`, `s3:PutBucketTagging`, `s3:PutBucketVersioning`,
+`s3:DeleteBucket`, `sqs:CreateQueue`, `sqs:TagQueue`, `sqs:SetQueueAttributes`,
+`sqs:GetQueueAttributes`, `sqs:GetQueueUrl`, `sqs:DeleteQueue` on the same prefixes).
+
+**Where the key lives.** The secret key goes to the org's secret store under
+`org/<org>/workload/<wl>/identity/<service>`, as JSON by account, so it lands in
+`secrets/org.age` for orgs that use one and teammates deploy with the same key. The state database
+records the user and the key's ID, never the secret:
+
+```text
+service_identities  id, workload_id, service, account, profile, user_name, user_arn,
+                    access_key_id, status ('pending' | 'ready'), orphaned,
+                    created_at, rotated_at
+```
+
+**Lifecycle.**
+
+| command | what happens to identities |
+|---|---|
+| `ikit plan` | `+ iam user wl-regere-dev-002-simulation-service (2 resources)` for a new one, `~ iam policy …` when the service's resources changed. |
+| `ikit apply` | After creating resources: ensure the user (with the boundary), rewrite its policy, and create an access key if none is stored or the stored one is gone. New IAM keys take a few seconds to work everywhere, so apply waits until the key passes `sts:GetCallerIdentity` (up to a minute) before rendering. |
+| `ikit svc rm` | Orphans the service's identity with its resources; its key keeps working until removed. |
+| `ikit res rm` | Removing a service's last resource also deletes its keys and user (unless `--keep`). |
+| `ikit wl rm --delete-resources` | Deletes the keys and users too. `--keep-resources` leaves them, listed for manual cleanup. |
+| `ikit res rotate <service>` | Creates a second key (IAM allows two), stores it, redeploys, then deletes the old one. |
+| `ikit res keys` | Lists the workload's identities: user, key ID, age, resources covered. |
+
+**Teams and machines.** The first apply creates the key; later applies, by anyone with access to
+the org's secrets, reuse it. If the secret is missing (a keychain org applied from another
+machine), apply creates a new key and deletes the old, so a service never has more than two.
+
+**Changing a backend over.** Turning `--per-service-keys` on for a backend in use changes the
+values of the services' key env vars; `plan` shows it as a change to the secrets file and the
+next apply recreates their containers with their own keys. Turning it off goes back to the
+backend's keys, leaving the users for `res rm`/`wl rm` to clean up.
+
+**Not covered.** Roles instead of keys: targets here are laptops and non-AWS VMs, where an
+instance role isn't available; IAM Roles Anywhere could replace keys later. Custom endpoints:
+per-service keys are AWS IAM only; RustFS and MinIO users come with phase 2.
 
 ## Databases
 
@@ -268,15 +361,19 @@ existing RDS instance named by the backend (creating RDS instances themselves is
 
 ## Phases
 
-1. **Core model with AWS** (done). Registry `needs`, `from: resource:`, `use`, the tables,
-   backends and bindings, `plan`/`apply`/`wl rm` handling, a new `ikit res` command
-   (`list|show|adopt|rm|bind|backend`), S3 buckets (with versioning) and SQS queues (with DLQ)
-   on AWS or a compatible server, tags, phase-1 credentials.
-2. **Self-hosted.** In-workload backends with init services: RustFS (or MinIO) for `s3`,
-   ElasticMQ for `sqs`; `database`/`postgres` on the workload's postgres; retire
-   `create-platform-dbs`.
-3. **More providers and APIs.** Azure Blob and GCS, `amqp` on RabbitMQ, per-service scoped
-   credentials, drift for resource settings. (External S3/SQS-compatible servers already work.)
+- **Phase 1, core model with AWS** (done). Registry `needs`, `from: resource:`, `use`, the tables,
+  backends and bindings, `plan`/`apply`/`wl rm` handling, a new `ikit res` command
+  (`list|show|adopt|rm|bind|backend`), S3 buckets (with versioning) and SQS queues (with DLQ)
+  on AWS or a compatible server, tags, phase-1 credentials.
+- **Phase 1.5, per-service credentials on AWS** (next). IAM users under `/ikit/<org>/` with a
+  required permissions boundary, one inline policy per service, keys in the org's secret store,
+  `res rotate`, `res keys`, `res backend set|iam-policy|test`.
+- **Phase 2, self-hosted.** In-workload backends with init services: RustFS (or MinIO) for `s3`,
+  ElasticMQ for `sqs`; `database`/`postgres` on the workload's postgres; retire
+  `create-platform-dbs`.
+- **Phase 3, more providers and APIs.** Azure Blob and GCS, `amqp` on RabbitMQ, per-service
+  credentials on self-hosted backends, drift for resource settings. (External S3/SQS-compatible
+  servers already work.)
 
 ## Example: the simulation services in phase 1
 
@@ -317,5 +414,7 @@ acme-dev-simulation-b88b643e`.
   registry spec and which can a workload override?
 - Should `ikit destroy --purge` empty and delete buckets for throwaway dev workloads, or is
   `wl rm --delete-resources` enough?
-- Per-service IAM needs `iam:*` on the profile. Is that acceptable for the team's AWS accounts, or
-  should scoped credentials come from a pre-made role ikit only attaches policies to?
+- Per-service keys need IAM write access on the provisioning profile, contained by the path and
+  boundary above. Should ikit also support handing out keys of IAM users made elsewhere (a
+  `res keys import`), for accounts where nothing may create users?
+- Should key rotation have a maximum age that `plan` warns about?
