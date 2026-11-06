@@ -10,7 +10,13 @@ dir="$home/orgs/$org"
 db="$dir/state.db"
 [ -f "$db" ] || { echo "no state.db for org '$org' at $db" >&2; exit 1; }
 
-q() { sqlite3 -readonly -header -separator ' | ' "$db" "$1"; }
+# A WAL-mode database with no -wal/-shm beside it (e.g. just pulled from remote state) can't be
+# opened with -readonly, so open it immutable then; nothing is pending in a WAL that isn't there.
+if [ -f "$db-wal" ]; then
+  q() { sqlite3 -readonly -header -separator ' | ' "$db" "$1"; }
+else
+  q() { sqlite3 -header -separator ' | ' "file:$db?mode=ro&immutable=1" "$1"; }
+fi
 section() { printf '\n## %s\n' "$1"; }
 
 section "config.yaml"
@@ -81,6 +87,26 @@ q "select * from locks"
 
 section "backups"
 q "select count(*) as backups from backups"
+
+section "remote state (remote.yaml, sync.json)"
+if [ -f "$dir/remote.yaml" ]; then
+  cat "$dir/remote.yaml"
+  [ -f "$dir/sync.json" ] && cat "$dir/sync.json" && echo
+else
+  echo "none: state is local only"
+fi
+
+# Encrypted org secrets: list the files and the recipients' labels, never the age payload.
+section "encrypted secrets (secrets/*.age, recipients/*.txt)"
+if [ -d "$dir/secrets" ]; then
+  for f in "$dir"/secrets/*.age; do [ -f "$f" ] && echo "file $(basename "$f")"; done
+  for r in "$dir"/recipients/*.txt; do
+    [ -f "$r" ] || continue
+    grep -v '^#' "$r" | grep . | sed -E "s/^([a-z0-9-]{12})[^ ]* */$(basename "$r" .txt): \1… /"
+  done
+else
+  echo "none: secrets are in the OS keychain"
+fi
 
 # Start order and Compose networks come from the generated compose file (local targets only).
 for compose in "$dir"/deploy/*/compose.yaml; do
