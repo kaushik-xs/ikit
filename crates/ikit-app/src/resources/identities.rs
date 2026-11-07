@@ -269,7 +269,26 @@ impl App {
     /// ikit holds. Returns whether any key was created (the compose files change).
     pub(crate) async fn ensure_identities(&self, wl: &Workload) -> Result<bool> {
         let mut changed = false;
+        let idents = self.store.resources().identities(Some(wl.id)).await?;
         for g in self.grants(wl).await? {
+            // In place already: no IAM calls, so deploying needs no provisioning credentials.
+            let done = idents.iter().any(|i| {
+                i.service == g.service
+                    && i.profile == g.profile
+                    && i.status == ResourceStatus::Ready
+                    && i.covers == g.covers()
+            }) && self
+                .identity_keys(&wl.name, &g.service)?
+                .get(&g.profile)
+                .is_some_and(|k| {
+                    idents.iter().any(|i| {
+                        i.service == g.service
+                            && i.access_key_id.as_deref() == Some(k.access_key_id.as_str())
+                    })
+                });
+            if done {
+                continue;
+            }
             let driver = self.resource_driver(&g.backend).await?;
             let boundary = g.backend.options.boundary.clone().ok_or_else(|| {
                 AppError::Invalid(format!(
@@ -313,7 +332,7 @@ impl App {
                     tags: &tags,
                 })
                 .await?;
-            let region = self.backend_access(&g.backend).await?.region;
+            let region = self.backend_region(&g.backend).await?;
             let refs: Vec<&Resource> = g.resources.iter().collect();
             let policy = iam::service_policy(&refs, &region, &account);
             driver

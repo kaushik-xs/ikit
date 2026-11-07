@@ -340,6 +340,9 @@ service_identities  id, workload_id, service, account, profile, user_name, user_
 **Teams and machines.** The first apply creates the key; later applies, by anyone with access to
 the org's secrets, reuse it. If the secret is missing (a keychain org applied from another
 machine), apply creates a new key and deletes the old, so a service never has more than two.
+When a workload's users, policies and keys are in place, apply makes no IAM calls and rendering
+reads regions from the resources (recorded when created) or the backend's settings, so deploying
+needs no provisioning credentials; see [team.md](team.md).
 
 **Changing a backend over.** Turning `--per-service-keys` on for a backend in use changes the
 values of the services' key env vars; `plan` shows it as a change to the secrets file and the

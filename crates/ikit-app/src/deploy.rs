@@ -2021,6 +2021,38 @@ services:
         assert!(!secrets_file.contains("s3cret"));
         assert!(!app.deploy_plan(wl).await.unwrap().needs_apply());
 
+        // A deploy-only machine: no provisioning keys (and an ~/.aws profile it doesn't have).
+        // Plan and apply work, and make no IAM calls when nothing needs doing.
+        app.profile_update(
+            ikit_core::ProfileKind::Aws,
+            "acme",
+            BTreeMap::from([("aws_profile".to_owned(), "not-on-this-machine".to_owned())]),
+            &["access_key_id".to_owned(), "secret_access_key".to_owned()],
+        )
+        .await
+        .unwrap();
+        let calls = driver.iam_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(!plan.needs_apply());
+        assert!(plan.rendered.compose.contains("AWS_REGION: ap-south-1"));
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        assert_eq!(
+            driver.iam_calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls
+        );
+        // Changing IAM needs them again.
+        app.profile_update(
+            ikit_core::ProfileKind::Aws,
+            "acme",
+            BTreeMap::from([
+                ("access_key_id".to_owned(), "AKIATEST".to_owned()),
+                ("secret_access_key".to_owned(), "s3cret".to_owned()),
+            ]),
+            &["aws_profile".to_owned()],
+        )
+        .await
+        .unwrap();
+
         // Rotation: a second key now, the first deleted by the apply that redeploys.
         let rotated = app.identity_rotate(wl, "sim").await.unwrap();
         assert!(rotated[0].retiring_key_id.is_some());

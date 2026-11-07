@@ -175,7 +175,9 @@ Design and later phases: [docs/resources.md](docs/resources.md).
   backend's `--boundary` policy; `res backend iam-policy` prints that boundary and the IAM policy
   the provisioning identity needs (users only under the org's path, only with the boundary).
   ikit doesn't create either policy. `res rotate` adds a second key; the apply that redeploys the
-  service deletes the old one.
+  service deletes the old one. With per-service keys, only creating or changing something needs
+  the provisioning credentials; deploying an unchanged workload doesn't (see
+  [docs/team.md](docs/team.md)).
 
 ### Remote state
 

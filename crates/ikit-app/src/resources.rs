@@ -563,10 +563,15 @@ impl App {
         let (name, outputs) = driver.inspect(r.api, id).await?.ok_or_else(|| {
             AppError::NotFound(format!("{} `{id}` on backend {}", r.kind(), backend.name))
         })?;
-        r.backend = Some(backend.name);
         r.external_id = name;
         r.outputs = known_outputs(r.api, &r.external_id);
         r.outputs.extend(outputs);
+        // Recorded, so rendering needs no credentials to know it.
+        r.outputs.insert(
+            "region".to_owned(),
+            self.backend_access(&backend).await?.region,
+        );
+        r.backend = Some(backend.name);
         r.origin = ResourceOrigin::Adopted;
         r.status = ResourceStatus::Ready;
         self.store
@@ -719,6 +724,10 @@ impl App {
             let outputs = self.resource_driver(&backend).await?.ensure(&want).await?;
             r.outputs = known_outputs(r.api, &r.external_id);
             r.outputs.extend(outputs);
+            r.outputs.insert(
+                "region".to_owned(),
+                self.backend_access(&backend).await?.region,
+            );
             r.backend = Some(backend.name);
             r.status = ResourceStatus::Ready;
             self.store
@@ -756,7 +765,18 @@ impl App {
                 Some(b) => {
                     let backend = self.resource_backend_show(&b).await?;
                     if !access.contains_key(&b) {
-                        access.insert(b.clone(), self.backend_access(&backend).await?);
+                        // Services with keys of their own don't need the provisioning ones, so
+                        // a machine without them can still deploy.
+                        let a = if backend.options.per_service_keys {
+                            Access {
+                                region: self.backend_region(&backend).await?,
+                                endpoint: backend.options.endpoint.clone(),
+                                keys: None,
+                            }
+                        } else {
+                            self.backend_access(&backend).await?
+                        };
+                        access.insert(b.clone(), a);
                     }
                     if backend.options.per_service_keys {
                         per_service.insert(
@@ -837,6 +857,26 @@ impl App {
             out.insert(service.clone(), mine);
         }
         Ok(out)
+    }
+
+    /// A backend's region without its credentials: its own setting, else its profile's, else
+    /// the named `~/.aws` profile's if this machine has it, else us-east-1.
+    pub(crate) async fn backend_region(&self, backend: &Backend) -> Result<String> {
+        if let Some(r) = &backend.options.region {
+            return Ok(r.clone());
+        }
+        let values = match &backend.profile {
+            Some(p) => self.profile_values(ProfileKind::Aws, p).await?,
+            None => BTreeMap::new(),
+        };
+        let get = |k: &str| values.get(k).filter(|v| !v.is_empty()).cloned();
+        Ok(get("region")
+            .or_else(|| {
+                get("aws_profile")
+                    .and_then(|n| crate::aws_shared::load(&n).ok())
+                    .and_then(|s| s.region)
+            })
+            .unwrap_or_else(|| "us-east-1".to_owned()))
     }
 
     /// Region, endpoint and credentials of a backend, from its options and aws profile.
@@ -920,6 +960,8 @@ pub(crate) mod tests {
         pub fail: Mutex<BTreeSet<String>>,
         pub users: Mutex<BTreeMap<String, FakeUser>>,
         next_key: Mutex<u32>,
+        /// `whoami` calls, one per identity ikit had to reconcile.
+        pub iam_calls: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
@@ -980,6 +1022,8 @@ pub(crate) mod tests {
         }
 
         async fn whoami(&self) -> Result<(String, String)> {
+            self.iam_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok((
                 "123456789012".into(),
                 "arn:aws:iam::123456789012:user/tofu".into(),

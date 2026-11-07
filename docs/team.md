@@ -123,13 +123,35 @@ When a pull changes who can read the secrets, ikit says so, naming who gained or
 Treat an unexpected change as an incident: anyone with write access to the bucket can edit the
 recipients file.
 
+## Buckets, queues and their keys
+
+Resources ([resources.md](resources.md)) are created with a backend's provisioning credentials,
+which come from an `aws` profile naming a `~/.aws` profile (`--set aws_profile=ikit-acme`). Never
+share those keys: give each provisioner an IAM user of their own in one group that carries the
+provisioning policy (`ikit res backend iam-policy <backend>` prints it), and the same profile
+name on every machine, so the shared org works everywhere while each machine acts as its own
+user.
+
+```sh
+aws iam create-user --user-name ikit-acme-alice
+aws iam add-user-to-group --group-name ikit-acme-provisioners --user-name ikit-acme-alice
+aws iam create-access-key --user-name ikit-acme-alice   # alice puts it in ~/.aws as [ikit-acme]
+```
+
+On backends with per-service keys, only creating or changing something needs those credentials:
+a new bucket, queue or service, a policy change, `res rotate`. Plan and apply of a workload whose
+resources and service users exist already need none, so SREs who only deploy don't need to be
+provisioners. The services' own keys travel in the org's secrets. On backends without per-service
+keys, services get the provisioning keys, so everyone who deploys needs them.
+
 ## Offboard an SRE
 
 ```sh
 ikit org secrets revoke alice@example.com                 # and --env prod, if granted
 ```
 
-Then remove their bucket access, and rotate every secret they could read. Revoking stops them
+Then remove their bucket access and their provisioning IAM user, and rotate every secret they
+could read (`ikit res rotate <service>` for services' own keys). Revoking stops them
 reading new versions of the secrets, not copies they already have, and older snapshots still
 open with their key.
 
