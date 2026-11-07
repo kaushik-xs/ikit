@@ -51,6 +51,7 @@ struct BackupRow {
     id: i64,
     workload: String,
     service: String,
+    database: Option<String>,
     engine: String,
     storage: String,
     object_key: String,
@@ -71,6 +72,7 @@ impl TryFrom<BackupRow> for Backup {
                 .map_err(|e: UnknownVariant| StateError::Corrupt(e.to_string()))?,
             workload: r.workload,
             service: r.service,
+            database: r.database,
             storage: r.storage,
             object_key: r.object_key,
             size: r.size,
@@ -146,12 +148,13 @@ impl StorageRepo for SqliteStorage {
         let now = Utc::now();
         sqlx::query_as!(
             BackupRow,
-            r#"INSERT INTO backups (workload, service, engine, storage, object_key, size, sha256, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               RETURNING id AS "id!", workload, service, engine, storage, object_key, size, sha256,
+            r#"INSERT INTO backups (workload, service, database, engine, storage, object_key, size, sha256, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               RETURNING id AS "id!", workload, service, database, engine, storage, object_key, size, sha256,
                          created_at AS "created_at: DateTime<Utc>""#,
             new.workload,
             new.service,
+            new.database,
             engine,
             new.storage,
             new.object_key,
@@ -167,7 +170,7 @@ impl StorageRepo for SqliteStorage {
     async fn backup(&self, id: i64) -> Result<Option<Backup>> {
         sqlx::query_as!(
             BackupRow,
-            r#"SELECT id AS "id!", workload, service, engine, storage, object_key, size, sha256,
+            r#"SELECT id AS "id!", workload, service, database, engine, storage, object_key, size, sha256,
                       created_at AS "created_at: DateTime<Utc>"
                FROM backups WHERE id = ?"#,
             id,
@@ -181,7 +184,7 @@ impl StorageRepo for SqliteStorage {
     async fn backups(&self, workload: Option<&str>, service: Option<&str>) -> Result<Vec<Backup>> {
         sqlx::query_as!(
             BackupRow,
-            r#"SELECT id AS "id!", workload, service, engine, storage, object_key, size, sha256,
+            r#"SELECT id AS "id!", workload, service, database, engine, storage, object_key, size, sha256,
                       created_at AS "created_at: DateTime<Utc>"
                FROM backups
                WHERE (?1 IS NULL OR workload = ?1) AND (?2 IS NULL OR service = ?2)
@@ -239,6 +242,7 @@ mod tests {
         let backup = |service| NewBackup {
             workload: "wl-dev-001",
             service,
+            database: Some("app"),
             engine: SqlEngine::Postgres,
             storage: "minio",
             object_key: "k",
@@ -262,6 +266,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((pg.len(), pg[0].id), (2, b2.id), "newest first");
+        assert_eq!(pg[0].database.as_deref(), Some("app"));
         assert!(store.storage().delete_backup(b2.id).await.unwrap());
         assert_eq!(store.storage().backups(None, None).await.unwrap().len(), 2);
     }

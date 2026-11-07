@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", workload, service, engine, storage, object_key, size, sha256,\n                      created_at AS \"created_at: DateTime<Utc>\"\n               FROM backups\n               WHERE (?1 IS NULL OR workload = ?1) AND (?2 IS NULL OR service = ?2)\n               ORDER BY id DESC",
+  "query": "SELECT id AS \"id!\", workload, service, database, engine, storage, object_key, size, sha256,\n                      created_at AS \"created_at: DateTime<Utc>\"\n               FROM backups\n               WHERE (?1 IS NULL OR workload = ?1) AND (?2 IS NULL OR service = ?2)\n               ORDER BY id DESC",
   "describe": {
     "columns": [
       {
@@ -19,33 +19,38 @@
         "type_info": "Text"
       },
       {
-        "name": "engine",
+        "name": "database",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "storage",
+        "name": "engine",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "object_key",
+        "name": "storage",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "size",
+        "name": "object_key",
         "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "size",
+        "ordinal": 7,
         "type_info": "Integer"
       },
       {
         "name": "sha256",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Text"
       },
       {
         "name": "created_at: DateTime<Utc>",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Text"
       }
     ],
@@ -56,6 +61,7 @@
       false,
       false,
       false,
+      true,
       false,
       false,
       false,
@@ -64,5 +70,5 @@
       false
     ]
   },
-  "hash": "e92acd7d9925045670fb8ca0e47ecbf45ff2dc148d2eb1da6284cb724b7f5247"
+  "hash": "d41195222c4cd298968c81bc28727613fac513ca10b8a7bca4c2ef504e81d28a"
 }

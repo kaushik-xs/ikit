@@ -91,6 +91,9 @@ pub struct Backup {
     pub id: i64,
     pub workload: String,
     pub service: String,
+    /// The database inside the service; `None` for backups of the default database taken
+    /// before ikit dumped each database separately.
+    pub database: Option<String>,
     pub engine: SqlEngine,
     pub storage: String,
     /// Object key inside the storage (including its prefix).

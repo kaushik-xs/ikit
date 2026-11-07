@@ -5,13 +5,13 @@ use crate::output::{Output, print_json, table};
 
 #[derive(Debug, Subcommand)]
 pub enum BackupCmd {
-    /// Dump a database service of the workload to storage.
+    /// Dump each database of a database service of the workload to storage.
     Run {
         service: String,
         /// Storage to write to (default: the only one).
         #[arg(long)]
         storage: Option<String>,
-        /// Afterwards keep only the newest N backups of this service.
+        /// Afterwards keep only the newest N backups of each of its databases.
         #[arg(long)]
         keep: Option<usize>,
     },
@@ -24,13 +24,13 @@ pub enum BackupCmd {
         #[arg(long)]
         all: bool,
     },
-    /// Restore a backup into its service, replacing the data there.
+    /// Restore a backup into its database, replacing the data there.
     Restore {
         id: i64,
         #[arg(long, short)]
         yes: bool,
     },
-    /// Delete all but the newest N backups of a service.
+    /// Delete all but the newest N backups of each database of a service.
     Prune {
         service: String,
         #[arg(long)]
@@ -69,13 +69,14 @@ pub async fn run(ctx: &Ctx, cmd: BackupCmd) -> anyhow::Result<()> {
                 return Ok(());
             }
             let mut t = table(&[
-                "ID", "WORKLOAD", "SERVICE", "STORAGE", "SIZE", "TAKEN", "KEY",
+                "ID", "WORKLOAD", "SERVICE", "DATABASE", "STORAGE", "SIZE", "TAKEN", "KEY",
             ]);
             for b in &backups {
                 t.add_row(vec![
                     b.id.to_string(),
                     b.workload.clone(),
                     b.service.clone(),
+                    database(b).to_owned(),
                     b.storage.clone(),
                     human(b.size),
                     b.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -88,11 +89,12 @@ pub async fn run(ctx: &Ctx, cmd: BackupCmd) -> anyhow::Result<()> {
         BackupCmd::Restore { id, yes } => {
             let b = app.backup_show(id).await?;
             let question = format!(
-                "Restore backup {id} ({} from {}) into {}/{}? Its current data is replaced.",
+                "Restore backup {id} ({} from {}) into {}/{} database {}? Its current data is replaced.",
                 human(b.size),
                 b.created_at.format("%Y-%m-%d %H:%M"),
                 b.workload,
-                b.service
+                b.service,
+                database(&b)
             );
             if !ctx.confirm(&question, yes)? {
                 return Ok(());
@@ -101,7 +103,12 @@ pub async fn run(ctx: &Ctx, cmd: BackupCmd) -> anyhow::Result<()> {
             if ctx.output == Output::Json {
                 return print_json(&b);
             }
-            println!("Restored backup {id} into {}/{}.", b.workload, b.service);
+            println!(
+                "Restored backup {id} into {}/{} database {}.",
+                b.workload,
+                b.service,
+                database(&b)
+            );
             return Ok(());
         }
         _ => {}
@@ -125,14 +132,16 @@ pub async fn run(ctx: &Ctx, cmd: BackupCmd) -> anyhow::Result<()> {
             if ctx.output == Output::Json {
                 return print_json(&report);
             }
-            let b = &report.backup;
-            println!(
-                "Backup {} of {wl}/{service}: {} to {} ({}).",
-                b.id,
-                human(b.size),
-                b.storage,
-                b.object_key
-            );
+            for b in &report.backups {
+                println!(
+                    "Backup {} of {wl}/{service} database {}: {} to {} ({}).",
+                    b.id,
+                    database(b),
+                    human(b.size),
+                    b.storage,
+                    b.object_key
+                );
+            }
             if !report.pruned.is_empty() {
                 let ids: Vec<String> = report.pruned.iter().map(|b| b.id.to_string()).collect();
                 println!("Pruned older backups: {}.", ids.join(", "));
@@ -173,6 +182,11 @@ pub async fn run(ctx: &Ctx, cmd: BackupCmd) -> anyhow::Result<()> {
         BackupCmd::List { .. } | BackupCmd::Restore { .. } => unreachable!("handled above"),
     }
     Ok(())
+}
+
+/// Backups from before per-database dumps hold the service's default database.
+fn database(b: &ikit_core::Backup) -> &str {
+    b.database.as_deref().unwrap_or("(default)")
 }
 
 fn human(bytes: i64) -> String {

@@ -1,8 +1,10 @@
 //! Database backups: dump inside the service's container, compress with zstd, upload to a
 //! storage, and keep a catalog (with checksums) in the org's state database.
 //!
-//! Postgres uses `pg_dump -Fc` / `pg_restore --clean`; MySQL uses `mysqldump` / `mysql`. Dumps
-//! are held in memory, which suits databases up to a few GB.
+//! Each database in the service is dumped to its own object and catalogued separately, so a
+//! Postgres holding one database per app backs up all of them. Postgres uses `pg_dump -Fc` /
+//! `pg_restore --clean`; MySQL uses `mysqldump --databases` / `mysql`. Dumps are held in memory,
+//! which suits databases up to a few GB.
 
 use std::time::Duration;
 
@@ -15,33 +17,70 @@ use crate::{App, AppError, Result};
 
 const DUMP_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
+/// Set in the service's container to the database being dumped or restored, so its name
+/// never passes through a shell.
+const DB_VAR: &str = "IKIT_DB";
+
+/// MySQL's own schemas, never backed up.
+const MYSQL_SYSTEM: [&str; 4] = ["information_schema", "mysql", "performance_schema", "sys"];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupReport {
-    pub backup: Backup,
+    /// One per database, in name order.
+    pub backups: Vec<Backup>,
     /// Older backups deleted by `keep`.
     pub pruned: Vec<Backup>,
 }
 
-fn dump_command(engine: SqlEngine) -> &'static str {
+/// Prints the service's databases, one per line.
+fn list_command(engine: SqlEngine) -> &'static str {
     match engine {
         SqlEngine::Postgres => {
-            r#"exec pg_dump -Fc -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}""#
+            r#"exec psql -X -A -t -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}" -c "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname""#
         }
         SqlEngine::Mysql => {
-            r#"MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --routines --triggers "$MYSQL_DATABASE""#
+            r#"MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot -N -B -e "SHOW DATABASES""#
         }
     }
 }
 
-fn restore_command(engine: SqlEngine) -> &'static str {
+/// Dumps the database named by `$IKIT_DB`.
+fn dump_command(engine: SqlEngine) -> &'static str {
     match engine {
-        SqlEngine::Postgres => {
+        SqlEngine::Postgres => r#"exec pg_dump -Fc -U "${POSTGRES_USER:-postgres}" -d "$IKIT_DB""#,
+        SqlEngine::Mysql => {
+            r#"MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --routines --triggers --databases "$IKIT_DB""#
+        }
+    }
+}
+
+/// Restores into the database named by `$IKIT_DB`, creating it if it is missing. With no
+/// database (backups from before per-database dumps), restores into the default database.
+fn restore_command(engine: SqlEngine, database: bool) -> &'static str {
+    match (engine, database) {
+        (SqlEngine::Postgres, true) => {
+            r#"createdb -U "${POSTGRES_USER:-postgres}" "$IKIT_DB" 2>/dev/null; exec pg_restore --clean --if-exists --no-owner -U "${POSTGRES_USER:-postgres}" -d "$IKIT_DB""#
+        }
+        (SqlEngine::Postgres, false) => {
             r#"exec pg_restore --clean --if-exists --no-owner -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}""#
         }
-        SqlEngine::Mysql => {
+        // A `--databases` dump creates and selects its database itself.
+        (SqlEngine::Mysql, true) => r#"MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot"#,
+        (SqlEngine::Mysql, false) => {
             r#"MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot "$MYSQL_DATABASE""#
         }
     }
+}
+
+/// The databases in `list_command`'s output worth backing up.
+fn databases(engine: SqlEngine, listed: &str) -> Vec<String> {
+    listed
+        .lines()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .filter(|d| engine != SqlEngine::Mysql || !MYSQL_SYSTEM.contains(d))
+        .map(str::to_owned)
+        .collect()
 }
 
 impl App {
@@ -67,8 +106,9 @@ impl App {
         Ok((wl, engine))
     }
 
-    /// Dumps `service` to `storage` (or the only storage). With `keep`, deletes all but the
-    /// newest `keep` backups of the service afterwards.
+    /// Dumps each database of `service` to `storage` (or the only storage), one backup per
+    /// database. With `keep`, deletes all but the newest `keep` backups of each database
+    /// afterwards. Stops at the first database that fails; the ones before it stay catalogued.
     pub async fn backup_run(
         &self,
         workload: &str,
@@ -91,44 +131,74 @@ impl App {
         let run_id = self.store.workloads().start_run(wl.id, run).await?;
 
         let result = async {
-            let args = ["exec", "-T", service, "sh", "-c", dump_command(engine)];
+            let args = ["exec", "-T", service, "sh", "-c", list_command(engine)];
             let out = self
                 .compose_with(&place, workload, &args, None, DUMP_TIMEOUT)
                 .await?;
-            if !out.success() || out.raw_stdout.is_empty() {
+            if !out.success() {
                 return Err(AppError::Invalid(format!(
-                    "dumping `{service}` failed: {}",
+                    "listing the databases in `{service}` failed: {}",
                     out.failure_detail()
                 )));
             }
-            let compressed = zstd::encode_all(out.raw_stdout.as_slice(), 3)?;
-            let sha256 = checksum_bytes(&compressed);
+            let dbs = databases(engine, &out.stdout);
+            if dbs.is_empty() {
+                return Err(AppError::Invalid(format!(
+                    "`{service}` has no databases to back up"
+                )));
+            }
             let ext = match engine {
                 SqlEngine::Postgres => "pgdump",
                 SqlEngine::Mysql => "sql",
             };
             let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-            let key = storage.key(&format!(
-                "{}/{workload}/{service}/{service}-{stamp}.{ext}.zst",
-                self.org.name
-            ));
-            let size = compressed.len() as i64;
-            self.put_object(&storage, &key, compressed).await?;
-            let new = NewBackup {
-                workload,
-                service,
-                engine,
-                storage: &storage.name,
-                object_key: &key,
-                size,
-                sha256: &sha256,
-            };
-            let backup = self.store.storage().add_backup(new).await?;
+            let mut backups = Vec::with_capacity(dbs.len());
+            for db in &dbs {
+                let env = format!("{DB_VAR}={db}");
+                let args = [
+                    "exec",
+                    "-T",
+                    "-e",
+                    env.as_str(),
+                    service,
+                    "sh",
+                    "-c",
+                    dump_command(engine),
+                ];
+                let out = self
+                    .compose_with(&place, workload, &args, None, DUMP_TIMEOUT)
+                    .await?;
+                if !out.success() || out.raw_stdout.is_empty() {
+                    return Err(AppError::Invalid(format!(
+                        "dumping database `{db}` of `{service}` failed: {}",
+                        out.failure_detail()
+                    )));
+                }
+                let compressed = zstd::encode_all(out.raw_stdout.as_slice(), 3)?;
+                let sha256 = checksum_bytes(&compressed);
+                let key = storage.key(&format!(
+                    "{}/{workload}/{service}/{db}-{stamp}.{ext}.zst",
+                    self.org.name
+                ));
+                let size = compressed.len() as i64;
+                self.put_object(&storage, &key, compressed).await?;
+                let new = NewBackup {
+                    workload,
+                    service,
+                    database: Some(db),
+                    engine,
+                    storage: &storage.name,
+                    object_key: &key,
+                    size,
+                    sha256: &sha256,
+                };
+                backups.push(self.store.storage().add_backup(new).await?);
+            }
             let pruned = match keep {
                 Some(n) => self.backup_prune(workload, service, n).await?,
                 None => vec![],
             };
-            Ok(BackupReport { backup, pruned })
+            Ok(BackupReport { backups, pruned })
         }
         .await;
         let (status, error) = match &result {
@@ -193,14 +263,17 @@ impl App {
                     )));
                 }
                 let dump = zstd::decode_all(compressed.as_slice())?;
-                let args = [
-                    "exec",
-                    "-T",
+                let env = backup.database.as_ref().map(|db| format!("{DB_VAR}={db}"));
+                let mut args = vec!["exec", "-T"];
+                if let Some(env) = &env {
+                    args.extend(["-e", env.as_str()]);
+                }
+                args.extend([
                     backup.service.as_str(),
                     "sh",
                     "-c",
-                    restore_command(engine),
-                ];
+                    restore_command(engine, env.is_some()),
+                ]);
                 let out = self
                     .compose_with(&place, &wl.name, &args, Some(&dump), DUMP_TIMEOUT)
                     .await?;
@@ -229,7 +302,7 @@ impl App {
         result.map(|()| backup)
     }
 
-    /// Deletes all but the newest `keep` backups of a service, objects first.
+    /// Deletes all but the newest `keep` backups of each database of a service, objects first.
     pub async fn backup_prune(
         &self,
         workload: &str,
@@ -241,8 +314,14 @@ impl App {
             .storage()
             .backups(Some(workload), Some(service))
             .await?;
+        let mut seen: std::collections::HashMap<Option<String>, usize> = Default::default();
         let mut pruned = Vec::new();
-        for b in all.into_iter().skip(keep) {
+        for b in all {
+            let n = seen.entry(b.database.clone()).or_default();
+            *n += 1;
+            if *n <= keep {
+                continue;
+            }
             let storage = self.storage_show(&b.storage).await?;
             self.delete_object(&storage, &b.object_key).await?;
             self.store.storage().delete_backup(b.id).await?;

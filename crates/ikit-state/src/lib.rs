@@ -295,6 +295,7 @@ pub struct NewStorage<'a> {
 pub struct NewBackup<'a> {
     pub workload: &'a str,
     pub service: &'a str,
+    pub database: Option<&'a str>,
     pub engine: SqlEngine,
     pub storage: &'a str,
     pub object_key: &'a str,

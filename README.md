@@ -138,9 +138,12 @@ ikit res rotate sim                                # new key; the next apply ret
 
 ### Backups
 
-- `backup run` dumps inside the service's container (`pg_dump -Fc`, `mysqldump`), compresses
-  with zstd and uploads to a storage; the catalog keeps size and SHA-256. `restore` verifies the
-  checksum, then `pg_restore --clean` (or `mysql`) replaces the data. Dumps are held in memory.
+- `backup run` dumps each database in the service (every Postgres database that accepts
+  connections; every MySQL schema but the system ones) inside its container (`pg_dump -Fc`,
+  `mysqldump --databases`), compresses each with zstd and uploads it as its own object; the
+  catalog keeps one backup per database with size and SHA-256. `restore <id>` verifies the
+  checksum, then `pg_restore --clean` (or `mysql`) replaces that database, creating it if it is
+  missing. `--keep` and `prune` count per database. Dumps are held in memory.
 - Storage credentials come from a profile (`aws` for S3, `azure`, `gcp`) or the environment. An
   `aws` profile can hold keys itself or name a profile in `~/.aws/credentials` with
   `--set aws_profile=<name>` (static keys only; SSO and assume-role profiles are not supported).

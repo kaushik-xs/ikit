@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO backups (workload, service, engine, storage, object_key, size, sha256, created_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!\", workload, service, engine, storage, object_key, size, sha256,\n                         created_at AS \"created_at: DateTime<Utc>\"",
+  "query": "SELECT id AS \"id!\", workload, service, database, engine, storage, object_key, size, sha256,\n                      created_at AS \"created_at: DateTime<Utc>\"\n               FROM backups WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -19,43 +19,49 @@
         "type_info": "Text"
       },
       {
-        "name": "engine",
+        "name": "database",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "storage",
+        "name": "engine",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "object_key",
+        "name": "storage",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "size",
+        "name": "object_key",
         "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "size",
+        "ordinal": 7,
         "type_info": "Integer"
       },
       {
         "name": "sha256",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Text"
       },
       {
         "name": "created_at: DateTime<Utc>",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 8
+      "Right": 1
     },
     "nullable": [
       false,
       false,
       false,
+      true,
       false,
       false,
       false,
@@ -64,5 +70,5 @@
       false
     ]
   },
-  "hash": "a12248de17cb9216f1d87c18f75a6697181e99d6dd02b802df84ab1614410b37"
+  "hash": "b5ca420bc2dfc244dac60cd136786ec0de19b5422433bec3cb81e991bdbf6bf2"
 }

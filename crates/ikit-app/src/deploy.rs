@@ -983,6 +983,13 @@ mod tests {
         ) -> io::Result<ExecOutput> {
             let line = format!("{program} {}", args.join(" "));
             self.calls.lock().unwrap().push(line.clone());
+            if line.contains("FROM pg_database") {
+                return Ok(ExecOutput {
+                    code: Some(0),
+                    stdout: "app\npostgres\n".into(),
+                    ..Default::default()
+                });
+            }
             if line.contains("pg_dump") {
                 let dump = b"PGDMP\x00binary\xff".to_vec();
                 return Ok(ExecOutput {
@@ -1681,19 +1688,33 @@ mod tests {
         };
         app.storage_add(req).await.unwrap();
 
-        let first = app
+        let backups = app
             .backup_run(wl, "postgres", None, None, "test")
             .await
             .unwrap()
-            .backup;
+            .backups;
+        let dbs: Vec<_> = backups.iter().map(|b| b.database.as_deref()).collect();
+        assert_eq!(
+            dbs,
+            [Some("app"), Some("postgres")],
+            "one backup per database"
+        );
+        let first = backups[0].clone();
         assert!(
             first
                 .object_key
-                .starts_with("backups/acme/wl-acme-dev-001/postgres/postgres-"),
+                .starts_with("backups/acme/wl-acme-dev-001/postgres/app-"),
             "{}",
             first.object_key
         );
         assert!(first.object_key.ends_with(".pgdump.zst"));
+        let calls = docker.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("exec -T -e IKIT_DB=app postgres sh -c exec pg_dump")),
+            "{calls:#?}"
+        );
         assert!(
             app.backup_run(wl, "redis-nope", None, None, "test")
                 .await
@@ -1701,6 +1722,13 @@ mod tests {
         );
 
         app.backup_restore(first.id, "test").await.unwrap();
+        let calls = docker.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("exec -T -e IKIT_DB=app postgres sh -c createdb")),
+            "restores into its own database: {calls:#?}"
+        );
         let restored = docker
             .sql
             .lock()
@@ -1722,16 +1750,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             report.pruned.iter().map(|b| b.id).collect::<Vec<_>>(),
-            [first.id]
+            [backups[1].id, first.id],
+            "keep applies to each database"
         );
-        assert_eq!(app.backup_list(Some(wl), None).await.unwrap().len(), 1);
+        assert_eq!(app.backup_list(Some(wl), None).await.unwrap().len(), 2);
         assert!(
             app.storage_remove("nas").await.is_err(),
             "storage with backups is protected"
         );
 
         // A tampered object is refused.
-        let latest = report.backup;
+        let latest = report.backups[0].clone();
         std::fs::write(
             dir.path().join("blobs").join(&latest.object_key),
             b"tampered",
