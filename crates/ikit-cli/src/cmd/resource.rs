@@ -42,8 +42,14 @@ pub enum ResourceCmd {
     #[command(subcommand)]
     Backend(BackendCmd),
     /// IAM users ikit created for the workload's services (backends with per-service keys).
-    #[command(subcommand)]
-    Keys(KeysCmd),
+    /// Lists them without a subcommand.
+    Keys {
+        /// Every workload's.
+        #[arg(long)]
+        all: bool,
+        #[command(subcommand)]
+        cmd: Option<KeysCmd>,
+    },
     /// Give a service a new access key. The next `ikit apply` redeploys it with the new key and
     /// then deletes the old one.
     Rotate { service: String },
@@ -266,7 +272,12 @@ pub async fn run(ctx: &Ctx, cmd: ResourceCmd) -> anyhow::Result<()> {
             }
         }
         ResourceCmd::Backend(cmd) => return backend(ctx, &app, cmd).await,
-        ResourceCmd::Keys(KeysCmd::List { all }) => {
+        ResourceCmd::Keys {
+            all,
+            cmd: None | Some(KeysCmd::List { .. }),
+        } => {
+            let all = all
+                || matches!(&cmd, ResourceCmd::Keys { cmd: Some(KeysCmd::List { all: true }), .. });
             let wl = if all { None } else { Some(workload()?) };
             let list = app.identities_list(wl.as_deref()).await?;
             if ctx.output == Output::Json {
@@ -311,7 +322,10 @@ pub async fn run(ctx: &Ctx, cmd: ResourceCmd) -> anyhow::Result<()> {
             }
             println!("{t}");
         }
-        ResourceCmd::Keys(KeysCmd::Rm { service, keep, yes }) => {
+        ResourceCmd::Keys {
+            cmd: Some(KeysCmd::Rm { service, keep, yes }),
+            ..
+        } => {
             let wl = workload()?;
             let question = if keep {
                 format!("Forget the IAM user of {service}? It stays in IAM.")
@@ -498,7 +512,7 @@ async fn backend(ctx: &Ctx, app: &ikit_app::App, cmd: BackendCmd) -> anyhow::Res
             println!("ok: {name} reaches account {} as {}", p.account, p.caller);
             match (&b.options.per_service_keys, &b.options.boundary) {
                 (true, Some(boundary)) => println!(
-                    "per-service keys: on; IAM users get the boundary {boundary} (it isn't checked:                      reading policies needs more than the provisioning policy allows)"
+                    "per-service keys: on; IAM users get the boundary {boundary} (not checked: reading policies needs more than the provisioning policy allows)"
                 ),
                 _ => println!("per-service keys: off; services get the profile's keys"),
             }

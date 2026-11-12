@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use aws_sdk_s3::error::DisplayErrorContext;
+use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata};
 use aws_sdk_s3::types::{
     BucketLocationConstraint, BucketVersioningStatus, CreateBucketConfiguration, Tag, Tagging,
     VersioningConfiguration,
@@ -63,12 +63,13 @@ impl AwsDriver {
         }
     }
 
-    fn error(&self, what: &str, e: impl std::error::Error) -> AppError {
-        AppError::Invalid(format!(
-            "backend {}: {what}: {}",
-            self.backend,
-            DisplayErrorContext(e)
-        ))
+    /// AWS's own code and message when it sent them, else the whole error chain.
+    fn error(&self, what: &str, e: impl std::error::Error + ProvideErrorMetadata) -> AppError {
+        let detail = match (e.code(), e.message()) {
+            (Some(code), Some(message)) => format!("{code}: {message}"),
+            _ => DisplayErrorContext(e).to_string(),
+        };
+        AppError::Invalid(format!("backend {}: {what}: {detail}", self.backend))
     }
 
     // ---- S3 ----
@@ -366,30 +367,8 @@ impl ResourceDriver for AwsDriver {
     }
 
     async fn ensure_user(&self, user: &IamUser<'_>) -> Result<String> {
-        match self.iam.get_user().user_name(user.name).send().await {
-            Ok(out) => {
-                let u = out.user().ok_or_else(|| {
-                    AppError::Invalid(format!(
-                        "backend {}: IAM user {} has no details",
-                        self.backend, user.name
-                    ))
-                })?;
-                let boundary = u
-                    .permissions_boundary()
-                    .and_then(|b| b.permissions_boundary_arn());
-                if boundary != Some(user.boundary) {
-                    return Err(AppError::Invalid(format!(
-                        "backend {}: IAM user {} exists without the permissions boundary {}; ikit won't use it",
-                        self.backend, user.name, user.boundary
-                    )));
-                }
-                return Ok(u.arn().to_owned());
-            }
-            Err(e)
-                if e.as_service_error()
-                    .is_some_and(|s| s.is_no_such_entity_exception()) => {}
-            Err(e) => return Err(self.error(&format!("looking up IAM user {}", user.name), e)),
-        }
+        // Create first: IAM authorizes a lookup of a user that doesn't exist against
+        // `user/<name>` without its path, which a policy scoped to the path denies.
         let mut create = self
             .iam
             .create_user()
@@ -401,11 +380,32 @@ impl ResourceDriver for AwsDriver {
                 create = create.tags(tag);
             }
         }
-        let out = create
+        match create.send().await {
+            Ok(out) => return Ok(out.user().map(|u| u.arn().to_owned()).unwrap_or_default()),
+            Err(e) if e.as_service_error().is_some_and(|s| s.is_entity_already_exists_exception()) => {}
+            Err(e) => return Err(self.error(&format!("creating IAM user {}", user.name), e)),
+        }
+        // It exists (under the path, so this lookup is allowed): only use it with the boundary.
+        let out = self
+            .iam
+            .get_user()
+            .user_name(user.name)
             .send()
             .await
-            .map_err(|e| self.error(&format!("creating IAM user {}", user.name), e))?;
-        Ok(out.user().map(|u| u.arn().to_owned()).unwrap_or_default())
+            .map_err(|e| self.error(&format!("looking up IAM user {}", user.name), e))?;
+        let u = out.user().ok_or_else(|| {
+            AppError::Invalid(format!("backend {}: IAM user {} has no details", self.backend, user.name))
+        })?;
+        let boundary = u
+            .permissions_boundary()
+            .and_then(|b| b.permissions_boundary_arn());
+        if boundary != Some(user.boundary) || !u.path().starts_with(user.path) {
+            return Err(AppError::Invalid(format!(
+                "backend {}: IAM user {} exists, but not under {} with the permissions boundary {}; ikit won't use it",
+                self.backend, user.name, user.path, user.boundary
+            )));
+        }
+        Ok(u.arn().to_owned())
     }
 
     async fn put_user_policy(&self, user: &str, name: &str, document: &str) -> Result<()> {

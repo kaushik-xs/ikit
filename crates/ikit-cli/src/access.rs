@@ -170,7 +170,10 @@ impl Command {
             Command::Resource(c) => match c {
                 ResourceCmd::List { .. }
                 | ResourceCmd::Show { .. }
-                | ResourceCmd::Keys(KeysCmd::List { .. })
+                | ResourceCmd::Keys {
+                    cmd: None | Some(KeysCmd::List { .. }),
+                    ..
+                }
                 | ResourceCmd::Backend(
                     BackendCmd::List
                     | BackendCmd::Show { .. }
@@ -181,7 +184,10 @@ impl Command {
                 ResourceCmd::Bind { .. }
                 | ResourceCmd::Adopt { .. }
                 | ResourceCmd::Rm { .. }
-                | ResourceCmd::Keys(KeysCmd::Rm { .. })
+                | ResourceCmd::Keys {
+                    cmd: Some(KeysCmd::Rm { .. }),
+                    ..
+                }
                 | ResourceCmd::Rotate { .. }
                 | ResourceCmd::Backend(
                     BackendCmd::Add { .. }
