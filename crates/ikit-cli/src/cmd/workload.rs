@@ -50,6 +50,16 @@ pub enum WorkloadCmd {
         #[arg(long)]
         keep_resources: bool,
     },
+    /// Let the selected workload (or --wl) reach another workload's app and platform
+    /// services, e.g. an app workload its platform workload. Both must be on one target.
+    Link {
+        /// The workload to reach.
+        provider: String,
+    },
+    /// Remove a link made with `wl link`.
+    Unlink { provider: String },
+    /// Show which workloads the selected one links to, and which link to it.
+    Links { name: Option<String> },
 }
 
 pub async fn run(ctx: &Ctx, cmd: WorkloadCmd) -> anyhow::Result<()> {
@@ -153,6 +163,60 @@ pub async fn run(ctx: &Ctx, cmd: WorkloadCmd) -> anyhow::Result<()> {
             }
         }
         WorkloadCmd::Use { .. } => unreachable!("handled above"),
+        WorkloadCmd::Link { provider } => {
+            let consumer = app.resolve_workload_name(ctx.wl.as_deref())?;
+            let added = app.workload_link(&consumer, &provider).await?;
+            if ctx.output == Output::Table {
+                if added {
+                    println!(
+                        "{consumer} now reaches {provider}'s app and platform services as {provider}-<service>, from the next apply of each."
+                    );
+                    println!(
+                        "References such as service:<name>.host find them when {consumer} has no service of that name."
+                    );
+                } else {
+                    println!("{consumer} already links to {provider}.");
+                }
+            }
+        }
+        WorkloadCmd::Unlink { provider } => {
+            let consumer = app.resolve_workload_name(ctx.wl.as_deref())?;
+            let removed = app.workload_unlink(&consumer, &provider).await?;
+            if ctx.output == Output::Table {
+                if removed {
+                    println!(
+                        "{consumer} no longer links to {provider}, from the next apply of each."
+                    );
+                } else {
+                    println!("{consumer} does not link to {provider}.");
+                }
+            }
+        }
+        WorkloadCmd::Links { name } => {
+            let name = app.resolve_workload_name(name.as_deref().or(ctx.wl.as_deref()))?;
+            let links = app.workload_links(&name).await?;
+            if ctx.output == Output::Json {
+                return print_json(&links);
+            }
+            if links.links_to.is_empty() && links.linked_from.is_empty() {
+                println!(
+                    "{name} has no links. Add one with `ikit wl link <workload> --wl {name}`."
+                );
+                return Ok(());
+            }
+            let mut t = table(&["DIRECTION", "WORKLOAD", "NETWORK"]);
+            for p in &links.links_to {
+                t.add_row(vec!["links to".to_owned(), p.clone(), format!("{p}-link")]);
+            }
+            for c in &links.linked_from {
+                t.add_row(vec![
+                    "linked from".to_owned(),
+                    c.clone(),
+                    format!("{name}-link"),
+                ]);
+            }
+            println!("{t}");
+        }
         WorkloadCmd::Runs { name, limit } => {
             let ctx = Ctx {
                 wl: name.or_else(|| ctx.wl.clone()),

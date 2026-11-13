@@ -457,6 +457,22 @@ impl App {
         Ok(urls)
     }
 
+    /// The domains the workload's routes answer on, sorted.
+    pub(crate) async fn route_hosts(&self, workload: &str) -> Result<Vec<String>> {
+        let wl = self.workload_get(workload).await?;
+        let mut hosts: Vec<String> = self
+            .store
+            .edge()
+            .routes(wl.id)
+            .await?
+            .into_iter()
+            .map(|r| r.host)
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        Ok(hosts)
+    }
+
     /// The loopback publishes routes need, per service.
     pub(crate) async fn route_publishes(
         &self,

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ikit_core::registry::unknown_env;
 use ikit_core::{
-    Category, Dependency, PortRequest, PublishedPort, RegistryVersion, ServiceInstance,
+    Category, Dependency, Generate, PortRequest, PublishedPort, RegistryVersion, ServiceInstance,
     ServiceSpec, VersionConstraint,
 };
 use ikit_state::{NewService, ServiceUpdate};
@@ -71,6 +71,72 @@ pub(crate) fn split_env(
     Ok(env
         .into_iter()
         .partition(|(k, _)| !spec.env_var(k).is_some_and(|v| v.secret)))
+}
+
+/// A new random value for a `generate:` secret.
+pub(crate) fn generate_secret(kind: Generate) -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("system randomness");
+    match kind {
+        Generate::Password => {
+            // Letters and digits only: safe in URLs, shells and connection strings.
+            const ALPHABET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            let mut out = String::with_capacity(32);
+            let mut pool = bytes.to_vec();
+            while out.len() < 32 {
+                for b in &pool {
+                    // Rejection sampling keeps every character equally likely.
+                    if (*b as usize) < 248 && out.len() < 32 {
+                        out.push(ALPHABET[*b as usize % 62] as char);
+                    }
+                }
+                getrandom::fill(&mut pool).expect("system randomness");
+            }
+            out
+        }
+        Generate::Hex32 => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        Generate::Base64_32 => base64(&bytes),
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Adds a generated value for every `generate:` secret of `spec` that `secrets` lacks.
+/// Returns the names it generated.
+pub(crate) fn fill_generated(
+    spec: &ServiceSpec,
+    secrets: &mut BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut made = Vec::new();
+    for var in &spec.env {
+        if let Some(kind) = var.generate
+            && !secrets.contains_key(&var.name)
+        {
+            secrets.insert(var.name.clone(), generate_secret(kind));
+            made.push(var.name.clone());
+        }
+    }
+    made
 }
 
 /// Dependencies of `services` not met by any of them.
@@ -157,7 +223,8 @@ impl App {
                     "service `{name}` in {workload}"
                 )));
             }
-            let (env, secrets) = split_env(&name, &version.spec, req.env)?;
+            let (env, mut secrets) = split_env(&name, &version.spec, req.env)?;
+            fill_generated(&version.spec, &mut secrets);
             prepared.push(Prepared {
                 name,
                 group: req.group,
@@ -257,12 +324,28 @@ impl App {
             )));
         }
 
+        // Secrets the new version generates and the service does not have yet.
+        let key = self.service_secret_key(workload, name);
+        let mut secrets: BTreeMap<String, String> = match self.secrets.get(&key)? {
+            Some(json) => serde_json::from_str(&json).map_err(|e| {
+                AppError::Invalid(format!("keychain entry {key} is not valid JSON: {e}"))
+            })?,
+            None => BTreeMap::new(),
+        };
+        let mut secret_env = service.secret_env.clone();
+        if !fill_generated(&version.spec, &mut secrets).is_empty() {
+            self.secrets.set(
+                &key,
+                &serde_json::to_string(&secrets).expect("string map serializes"),
+            )?;
+            secret_env = secrets.keys().cloned().collect();
+        }
         let wl = self.workload_get(workload).await?;
         let update = ServiceUpdate {
             version_id: version.id,
             constraint: &constraint,
             env: &service.env,
-            secret_env: &service.secret_env,
+            secret_env: &secret_env,
             publish: &service.publish,
         };
         self.store
@@ -284,6 +367,20 @@ impl App {
         set: BTreeMap<String, String>,
         unset: &[String],
     ) -> Result<ServiceInstance> {
+        self.service_set_env_generating(workload, name, set, unset, &[])
+            .await
+    }
+
+    /// Like [`App::service_set_env`], and also (re)generates the `generate:` secrets named
+    /// in `generate`.
+    pub async fn service_set_env_generating(
+        &self,
+        workload: &str,
+        name: &str,
+        set: BTreeMap<String, String>,
+        unset: &[String],
+        generate: &[String],
+    ) -> Result<ServiceInstance> {
         let (service, version) = self.service_show(workload, name).await?;
         let spec = &version.spec;
         let key = self.service_secret_key(workload, name);
@@ -300,6 +397,15 @@ impl App {
                     "`{name}` has no value set for {k}"
                 )));
             }
+        }
+        for k in generate {
+            let kind = spec.env_var(k).and_then(|e| e.generate).ok_or_else(|| {
+                AppError::Invalid(format!(
+                    "{}@{} does not generate {k}",
+                    service.registry_service, version.version
+                ))
+            })?;
+            secrets.insert(k.clone(), generate_secret(kind));
         }
         for (k, v) in set {
             if spec.env_var(&k).is_some_and(|e| e.secret) {
@@ -841,5 +947,22 @@ mod tests {
                 .await,
             Err(AppError::InUse { .. })
         ));
+    }
+
+    #[test]
+    fn generated_secrets_have_their_shape() {
+        let p = super::generate_secret(ikit_core::Generate::Password);
+        assert_eq!(p.len(), 32);
+        assert!(p.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(p, super::generate_secret(ikit_core::Generate::Password));
+        let h = super::generate_secret(ikit_core::Generate::Hex32);
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            super::generate_secret(ikit_core::Generate::Base64_32).len(),
+            44
+        );
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
     }
 }

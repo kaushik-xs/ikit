@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT w.name FROM workload_links l JOIN workloads w ON w.id = l.consumer_id\n               WHERE l.provider_id = ? ORDER BY w.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "868d68c4e7acb1509bc82a4c90b4be6fba9de8e907c826fc33e43ba49e7f1ff0"
+}

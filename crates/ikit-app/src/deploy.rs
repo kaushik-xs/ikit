@@ -13,8 +13,8 @@ use ikit_core::{
 };
 use ikit_net::Member;
 use ikit_provider::compose::{
-    self, COMPOSE_FILE, Plan, Rendered, SECRETS_FILE, ServiceInput, WorkloadInput, ZT_SIDECAR,
-    ZtSidecar,
+    self, COMPOSE_FILE, LinkedWorkload, Plan, Rendered, SECRETS_FILE, ServiceInput, WorkloadInput,
+    ZT_SIDECAR, ZtSidecar,
 };
 use ikit_state::NewRun;
 use serde::{Deserialize, Serialize};
@@ -376,7 +376,59 @@ impl App {
     /// The workload's compose files, with secret values read from the keychain.
     pub async fn render_workload(&self, workload: &str) -> Result<Rendered> {
         let detail = self.workload_show(workload).await?;
-        let mut route_publishes = self.route_publishes(&detail.workload).await?;
+        let services = self.service_inputs(workload, true).await?;
+        let zerotier = self.zt_sidecar_network(workload).await?.map(|n| ZtSidecar {
+            network_id: n.network_id,
+        });
+        let external_networks = self
+            .store
+            .networks()
+            .docker_networks(detail.workload.id)
+            .await?;
+        let providers = self
+            .store
+            .networks()
+            .providers_of(detail.workload.id)
+            .await?;
+        let consumers = self
+            .store
+            .networks()
+            .consumers_of(detail.workload.id)
+            .await?;
+        let mut host_aliases = self.route_hosts(workload).await?;
+        let mut linked = Vec::new();
+        for provider in providers {
+            host_aliases.extend(self.route_hosts(&provider).await?);
+            linked.push(LinkedWorkload {
+                services: self.service_inputs(&provider, false).await?,
+                workload: provider,
+            });
+        }
+        host_aliases.sort();
+        host_aliases.dedup();
+        let input = WorkloadInput {
+            org: self.org.name.clone(),
+            workload: workload.to_owned(),
+            env: detail.workload.env.clone(),
+            services,
+            zerotier,
+            external_networks,
+            linked,
+            offers_link: !consumers.is_empty(),
+            host_aliases,
+        };
+        compose::render(&input).map_err(|e| AppError::Invalid(e.to_string()))
+    }
+
+    /// Everything the renderer needs about a workload's services. `publish` adds the
+    /// loopback ports its routes need (only the workload being rendered publishes).
+    async fn service_inputs(&self, workload: &str, publish: bool) -> Result<Vec<ServiceInput>> {
+        let detail = self.workload_show(workload).await?;
+        let mut route_publishes = if publish {
+            self.route_publishes(&detail.workload).await?
+        } else {
+            BTreeMap::new()
+        };
         let mut urls = self.route_urls(workload).await?;
         let mut resources = self.resource_inputs(&detail.workload).await?;
         let mut specs = BTreeMap::new();
@@ -395,7 +447,7 @@ impl App {
                 let key = self.service_secret_key(workload, &instance.name);
                 let json = self.secrets.get(&key)?.ok_or_else(|| {
                     AppError::Invalid(format!(
-                        "keychain entry {key} is missing; set the secrets again with `ikit svc set {} --secret ...`",
+                        "keychain entry {key} is missing; set the secrets again with `ikit svc set {} --secret ... --wl {workload}`",
                         instance.name
                     ))
                 })?;
@@ -412,22 +464,7 @@ impl App {
                 secrets,
             });
         }
-        let zerotier = self.zt_sidecar_network(workload).await?.map(|n| ZtSidecar {
-            network_id: n.network_id,
-        });
-        let external_networks = self
-            .store
-            .networks()
-            .docker_networks(detail.workload.id)
-            .await?;
-        let input = WorkloadInput {
-            org: self.org.name.clone(),
-            workload: workload.to_owned(),
-            services,
-            zerotier,
-            external_networks,
-        };
-        compose::render(&input).map_err(|e| AppError::Invalid(e.to_string()))
+        Ok(services)
     }
 
     /// What `apply` would change on the target.
@@ -473,6 +510,7 @@ impl App {
         let identities = self.identity_plans(&wl).await?;
         let mut warnings = self.boundary_warnings(&wl).await?;
         warnings.extend(port_notes);
+        warnings.extend(self.link_notes(&wl).await?);
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -630,6 +668,7 @@ impl App {
                 )
                 .await?;
             self.write_files(&place, &rendered).await?;
+            self.ensure_link_networks(wl, &place).await?;
             let logins = self.store.registry().logins().await?;
             let hosts: std::collections::BTreeSet<String> = rendered
                 .images

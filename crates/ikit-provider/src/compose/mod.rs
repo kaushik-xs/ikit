@@ -3,8 +3,8 @@ mod render;
 
 pub use diff::{Change, Plan, diff};
 pub use render::{
-    RenderError, Rendered, ResourceValues, ServiceInput, WorkloadInput, ZT_SIDECAR,
-    ZT_SIDECAR_IMAGE, ZtSidecar, image_registry, render,
+    LinkedWorkload, RenderError, Rendered, ResourceValues, ServiceInput, WorkloadInput, ZT_SIDECAR,
+    ZT_SIDECAR_IMAGE, ZtSidecar, image_registry, link_network_name, render,
 };
 
 /// Main compose file; holds no secret values.

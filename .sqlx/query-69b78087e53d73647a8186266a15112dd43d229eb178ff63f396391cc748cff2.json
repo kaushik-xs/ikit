@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO workload_links (consumer_id, provider_id, created_at)\n               VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "69b78087e53d73647a8186266a15112dd43d229eb178ff63f396391cc748cff2"
+}

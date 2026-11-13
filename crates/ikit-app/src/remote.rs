@@ -822,11 +822,9 @@ impl Session {
             // A write pushes everything since the last sync, including changes an earlier
             // read left behind. A read only reports what it changed itself, so it compares
             // with the cache as it found it.
-            Ok((head, head_version, _synced, notices)) if !write => {
-                fingerprint(&org)
-                    .await
-                    .map(|now| (head, head_version, now, notices))
-            }
+            Ok((head, head_version, _synced, notices)) if !write => fingerprint(&org)
+                .await
+                .map(|now| (head, head_version, now, notices)),
             other => other,
         };
         match synced {

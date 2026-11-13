@@ -104,8 +104,12 @@ impl Command {
                 WorkloadCmd::List { .. }
                 | WorkloadCmd::Show { .. }
                 | WorkloadCmd::Runs { .. }
-                | WorkloadCmd::Use { .. } => Read,
-                WorkloadCmd::Create { .. } | WorkloadCmd::Rm { .. } => Write,
+                | WorkloadCmd::Use { .. }
+                | WorkloadCmd::Links { .. } => Read,
+                WorkloadCmd::Create { .. }
+                | WorkloadCmd::Rm { .. }
+                | WorkloadCmd::Link { .. }
+                | WorkloadCmd::Unlink { .. } => Write,
             },
             Command::Group(c) => match c {
                 GroupCmd::List => Read,

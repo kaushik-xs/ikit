@@ -52,6 +52,7 @@ pub mod resource;
 pub mod script;
 pub mod storage;
 pub mod target;
+pub mod template;
 pub mod version;
 pub mod workload;
 
@@ -68,7 +69,7 @@ pub use network::{DockerNetwork, Network, NetworkOrigin, is_docker_network_name}
 pub use ports::{PortDefaults, PortRange};
 pub use profile::{FieldSpec, Profile, ProfileError, ProfileKind, ProfileValues, Requirement};
 pub use registry::{
-    Category, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,
+    Category, Generate, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,
 };
 pub use remote::{Head, LockInfo, RemoteSpec};
 pub use resource::{

@@ -335,6 +335,14 @@ pub trait NetworkRepo: Send + Sync {
     ) -> Result<u64>;
     /// A workload's external Docker networks, by name then group.
     async fn docker_networks(&self, workload_id: i64) -> Result<Vec<DockerNetwork>>;
+    /// Links `consumer` to `provider`. Returns false if it already was.
+    async fn link_workload(&self, consumer_id: i64, provider_id: i64) -> Result<bool>;
+    /// Returns whether the link existed.
+    async fn unlink_workload(&self, consumer_id: i64, provider_id: i64) -> Result<bool>;
+    /// Names of the workloads `consumer` links to, sorted.
+    async fn providers_of(&self, consumer_id: i64) -> Result<Vec<String>>;
+    /// Names of the workloads that link to `provider`, sorted.
+    async fn consumers_of(&self, provider_id: i64) -> Result<Vec<String>>;
 }
 
 #[async_trait]
