@@ -84,7 +84,7 @@ impl Command {
                 | RegistryCmd::Logout { .. } => Write,
             },
             Command::Target(c) => match c {
-                TargetCmd::List | TargetCmd::Show { .. } => Read,
+                TargetCmd::List | TargetCmd::Show { .. } | TargetCmd::Ports { .. } => Read,
                 TargetCmd::Edge(EdgeCmd::Status { .. }) => Read,
                 TargetCmd::Edge(
                     EdgeCmd::Install { .. }

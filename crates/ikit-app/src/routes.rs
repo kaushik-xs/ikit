@@ -2,7 +2,7 @@
 //! port, which is published on the host's loopback address at an upstream port ikit picks.
 //! Redirects send a domain elsewhere. Automatic routes follow a workload's services.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use ikit_core::config::default_port_name;
 use ikit_core::edge::{expand_host_template, is_hostname, parse_redirect_target, parse_route_path};
@@ -13,6 +13,7 @@ use ikit_core::{
 use ikit_state::{NewRedirect, NewRoute};
 use serde::Serialize;
 
+use crate::ports::ClaimScope;
 use crate::{App, AppError, Result};
 
 /// What `ikit route add` asks for.
@@ -107,7 +108,9 @@ impl App {
                 .delete_route(wl.id, &host, path.as_deref())
                 .await?;
         }
-        Ok(self.store.edge().insert_route(wl.id, new).await?)
+        let route = self.store.edge().insert_route(wl.id, new).await?;
+        self.share_port_claims(&wl.target).await;
+        Ok(route)
     }
 
     /// Removes a route by `host` or `host/path`. An automatic route is not added back.
@@ -132,6 +135,7 @@ impl App {
                 .set_auto_routes(wl.id, Some(&auto))
                 .await?;
         }
+        self.share_port_claims(&wl.target).await;
         Ok(route)
     }
 
@@ -219,6 +223,7 @@ impl App {
             }
         }
         self.store.edge().set_auto_routes(wl.id, None).await?;
+        self.share_port_claims(&wl.target).await;
         self.route_list(workload).await
     }
 
@@ -249,12 +254,14 @@ impl App {
             }
         }
         let routes = self.store.edge().routes(wl.id).await?;
+        let mut changed = false;
         for r in routes.iter().filter(|r| r.origin == RouteOrigin::Auto) {
             if wanted.get(&r.service) != Some(&r.port) {
                 self.store
                     .edge()
                     .delete_route(wl.id, &r.host, r.path.as_deref())
                     .await?;
+                changed = true;
             }
         }
         let mut skipped = Vec::new();
@@ -287,9 +294,13 @@ impl App {
                 upstream_port,
                 origin: RouteOrigin::Auto,
             };
-            if let Err(e) = self.store.edge().insert_route(wl.id, new).await {
-                skipped.push(e.to_string());
+            match self.store.edge().insert_route(wl.id, new).await {
+                Ok(_) => changed = true,
+                Err(e) => skipped.push(e.to_string()),
             }
+        }
+        if changed {
+            self.share_port_claims(&wl.target).await;
         }
         Ok(skipped)
     }
@@ -437,9 +448,9 @@ impl App {
     }
 
     /// The loopback port for `service`'s container `port`: the one an existing route of it
-    /// already uses, or the first free one in the org's range. Free means not published or
-    /// routed by any of this org's workloads on the target, and not used by another org's
-    /// site on the target's proxy (when the host can be asked).
+    /// already uses, or the first free one in the org's range. Free is decided by
+    /// [`App::host_ports`]: not published or routed by any of this org's workloads on the
+    /// target, not used by another org's site on the target's proxy, and not reserved.
     async fn upstream_port(&self, wl: &Workload, service: &str, port: u16) -> Result<u16> {
         let routes = self.store.edge().all_routes().await?;
         if let Some((_, r)) = routes
@@ -448,31 +459,17 @@ impl App {
         {
             return Ok(r.upstream_port);
         }
-        let mut taken: BTreeSet<u16> = BTreeSet::new();
-        let workloads = self.workload_list(None).await?;
-        for other in workloads.iter().filter(|w| w.target == wl.target) {
-            for s in self.store.workloads().services(other.id).await? {
-                taken.extend(s.publish.iter().map(|p| p.host));
-            }
-            taken.extend(
-                routes
-                    .iter()
-                    .filter(|(w, _)| *w == other.name)
-                    .map(|(_, r)| r.upstream_port),
-            );
-        }
-        let target = self.target_show(&wl.target).await?;
-        if target.edge.is_some()
-            && let Ok(probe) = self.edge_probe(&target.name).await
-        {
-            for (_, header) in &probe.sites {
-                if let Some(h) = header {
-                    taken.extend(h.routes.iter().map(|r| r.upstream));
-                }
-            }
+        let scope = ClaimScope {
+            probe: true,
+            ..ClaimScope::default()
+        };
+        let ports = self.host_ports(&wl.target, scope).await?;
+        for note in &ports.notes {
+            tracing::warn!("{note}");
         }
         let [first, last] = self.config()?.edge.upstream_ports;
-        (first..=last).find(|p| !taken.contains(p)).ok_or_else(|| {
+        let range = ikit_core::PortRange::new(first, last);
+        ports.first_free(range, false).ok_or_else(|| {
             AppError::Invalid(format!(
                 "no free upstream port in {first}-{last} on `{}`; widen `edge.upstream_ports`",
                 wl.target

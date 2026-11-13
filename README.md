@@ -43,6 +43,9 @@ ikit sg add data                                   # interactive picker
 ikit sg add app --services 'orders-api@^1' --with-deps --set orders-api.LOG_LEVEL=debug
 ikit svc upgrade postgres --to '^17'
 ikit svc publish orders-api 8080:8080             # host:container
+ikit svc publish orders-api 8080                  # container port only: ikit picks a free host port
+ikit svc publish traefik --auto [--bind 127.0.0.1]  # every declared port, at picked host ports
+ikit target ports vm-1                            # host ports in use or claimed, and what is free
 ikit wl show
 
 ikit registry login ghcr.io --username octocat     # token from a prompt or IKIT_REGISTRY_PASSWORD
@@ -245,8 +248,18 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
   `.url`, the service's first route).
 - Several workloads can share a target: each is its own Compose project with its own network.
   `plan` blocks a host port that another applied (or failed) workload on the same target
-  already publishes, unless both bind different addresses. Ports taken by other orgs or by
-  anything else on the host still fail at `docker compose up`.
+  already publishes or routes to, that another org's route uses on the target's proxy, or that
+  the host shows in use (`ss` for listening processes, `docker ps` for any container's ports),
+  unless both bind different addresses. Orgs sharing a target also leave a claim file there
+  (`/var/lib/ikit/ports/<org>.json`, or `~/.local/state/ikit/ports/` without root), so ports
+  another org published but has not applied are taken too. Turn the host check and claim
+  files off with `ports.probe: false`.
+- Ports listed under `ports.reserved` in `config.yaml` (e.g. `[5432, 9000-9100]`) can never be
+  published: `svc publish` refuses them and `plan` blocks them. ikit itself never hands out
+  `1-1023` or `9993`.
+- `svc publish <svc> <container port>` (or `--auto` for every declared port) picks the lowest
+  free host port in `ports.range` (default 10000-19999). Picked ports stay with the service
+  until removed. See [docs/ports.md](docs/ports.md).
 - Each apply or destroy holds a per-workload lock and is recorded in the run history. A workload
   must be destroyed before `ikit wl rm` removes it. Kubernetes targets arrive in Phase 5.
 
@@ -274,7 +287,8 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
   previous version is reinstalled.
 - `route add` sends a domain (and an optional path prefix, stripped before proxying) to a service
   port. ikit publishes that port on `127.0.0.1` at an upstream port from `edge.upstream_ports`
-  (default 20000-29999), so it is only reachable through the proxy. Without `--host`, the
+  (default 20000-29999), skipping taken and reserved ports, so it is only reachable through
+  the proxy. Without `--host`, the
   domain comes from `edge.host_template` (default `{service}.{workload}.{base_domain}`) and
   `edge.base_domain` in the org's `config.yaml`. TLS modes: `acme` (default; the domain must
   resolve to the host), `internal` (the proxy's own CA, for private or ZeroTier-only hosts) and

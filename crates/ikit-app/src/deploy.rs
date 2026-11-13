@@ -20,6 +20,7 @@ use ikit_state::NewRun;
 use serde::{Deserialize, Serialize};
 
 use crate::hooks::{HookOutcome, HookPlan};
+use crate::ports::ClaimScope;
 use crate::targets::ssh_args;
 use crate::{App, AppError, ExecOutput, Result};
 
@@ -462,14 +463,16 @@ impl App {
                 unpinned.join(", ")
             ));
         }
-        blockers.extend(self.port_clashes(&wl).await?);
+        let (port_blockers, port_notes) = self.port_clashes(&wl).await?;
+        blockers.extend(port_blockers);
         blockers.extend(self.docker_network_blockers(&wl, &place).await?);
         let (edge, edge_blockers) = self.edge_plan(&wl, &target).await?;
         blockers.extend(edge_blockers);
         let (resources, resource_blockers) = self.resource_plans(&wl).await?;
         blockers.extend(resource_blockers);
         let identities = self.identity_plans(&wl).await?;
-        let warnings = self.boundary_warnings(&wl).await?;
+        let mut warnings = self.boundary_warnings(&wl).await?;
+        warnings.extend(port_notes);
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -485,49 +488,58 @@ impl App {
         })
     }
 
-    /// Host ports `wl` publishes that another workload on its target, one that may have
-    /// containers there (not a draft), already publishes. Only this org's workloads are
-    /// known; ports used by anything else on the host still fail at `docker compose up`.
-    async fn port_clashes(&self, wl: &Workload) -> Result<Vec<String>> {
+    /// Host ports `wl` publishes that are reserved in the org config, that another workload
+    /// on its target, one that may have containers there (not a draft), already publishes or
+    /// routes to, or that the host shows in use (a listening process, another container).
+    /// `wl`'s own running containers do not count: apply replaces them.
+    ///
+    /// Also returns why the host's listeners could not be checked, if they could not.
+    async fn port_clashes(&self, wl: &Workload) -> Result<(Vec<String>, Vec<String>)> {
         let mine = self.store.workloads().services(wl.id).await?;
         if mine.iter().all(|s| s.publish.is_empty()) {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
+        let scope = ClaimScope {
+            except: Some(&wl.name),
+            skip_drafts: true,
+            probe: true,
+        };
+        let ports = self.host_ports(&wl.target, scope).await?;
         let mut clashes = Vec::new();
-        for other in self.workload_list(None).await? {
-            if other.name == wl.name
-                || other.target != wl.target
-                || other.status == WorkloadStatus::Draft
-            {
-                continue;
-            }
-            let theirs = self.store.workloads().services(other.id).await?;
-            for s in &mine {
-                for p in &s.publish {
-                    let Some((t, q)) = theirs
-                        .iter()
-                        .find_map(|t| t.publish.iter().find(|q| p.clashes(q)).map(|q| (t, q)))
-                    else {
-                        continue;
-                    };
+        for s in &mine {
+            for p in &s.publish {
+                if let Some(r) = ports.policy.reserved_by_org(p.host) {
                     clashes.push(format!(
-                        "`{}` publishes {p}, but host port {} on `{}` is already published by `{}` of {} ({q}); \
-                         move it with `ikit svc publish {} <port>:{} --remove {} --wl {}`, or free it in {}",
-                        s.name,
-                        p.host,
-                        wl.target,
-                        t.name,
-                        other.name,
-                        s.name,
-                        p.container,
-                        p.host,
-                        wl.name,
-                        other.name,
+                        "`{}` publishes {p}, but host port {} is reserved in config.yaml (ports.reserved: {r}); \
+                         move it with `ikit svc publish {} <port>:{} --remove {} --wl {}`",
+                        s.name, p.host, s.name, p.container, p.host, wl.name,
                     ));
+                    continue;
                 }
+                let Some(c) = ports.clash(p) else {
+                    continue;
+                };
+                let free = c
+                    .owner
+                    .workload()
+                    .map(|w| format!(", or free it in {w}"))
+                    .unwrap_or_default();
+                clashes.push(format!(
+                    "`{}` publishes {p}, but host port {} on `{}` is already {} ({}); \
+                     move it with `ikit svc publish {} <port>:{} --remove {} --wl {}`{free}",
+                    s.name,
+                    p.host,
+                    ports.target,
+                    c.owner,
+                    c.describe_port(),
+                    s.name,
+                    p.container,
+                    p.host,
+                    wl.name,
+                ));
             }
         }
-        Ok(clashes)
+        Ok((clashes, ports.notes))
     }
 
     pub(crate) async fn lock(&self, wl: &Workload, holder: &str) -> Result<()> {
@@ -573,6 +585,8 @@ impl App {
         if let Some(b) = plan.blockers.first() {
             return Err(AppError::Invalid(b.clone()));
         }
+        // Keep this org's claim file on the host current before the ports go live.
+        self.share_port_claims(&wl.target).await;
         if plan.plan != expected.plan
             || plan.rendered != expected.rendered
             || plan.resources != expected.resources
@@ -929,6 +943,11 @@ mod tests {
         ledger: Mutex<BTreeMap<(String, String), String>>,
         /// SQL piped into `exec` calls.
         sql: Mutex<Vec<String>>,
+        /// What the host listener probe prints, or why it fails.
+        listeners: Mutex<String>,
+        listeners_fail: Mutex<Option<String>>,
+        /// Claim files written to the host.
+        claims: Mutex<Vec<String>>,
     }
 
     impl FakeDocker {
@@ -1006,6 +1025,30 @@ mod tests {
                 return Ok(ExecOutput {
                     code: Some(0),
                     ..Default::default()
+                });
+            }
+            if line.contains("/var/lib/ikit/ports") && line.contains("mv -f") {
+                self.claims
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(stdin.unwrap_or_default()).into_owned());
+                return Ok(ExecOutput {
+                    code: Some(0),
+                    ..Default::default()
+                });
+            }
+            if line.contains("ss -Htulnp") {
+                return Ok(match &*self.listeners_fail.lock().unwrap() {
+                    None => ExecOutput {
+                        code: Some(0),
+                        stdout: self.listeners.lock().unwrap().clone(),
+                        ..Default::default()
+                    },
+                    Some(e) => ExecOutput {
+                        code: Some(1),
+                        stderr: e.clone(),
+                        ..Default::default()
+                    },
                 });
             }
             if line.contains("zerotier-cli -j info") {
@@ -2275,6 +2318,372 @@ services:
         .await
         .unwrap();
         assert!(app.deploy_plan(b).await.unwrap().blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reserved_host_ports_cannot_be_published() {
+        let (_dir, app, _) = app().await;
+        let app = app.with_exec(Arc::new(FakeDocker::default()));
+        app.target_attach("box", Connection::Local).await.unwrap();
+        let wl = "wl-acme-dev-001";
+        app.workload_create("dev", "box").await.unwrap();
+        let nginx = ServiceRequest {
+            name: None,
+            registry: "nginx".into(),
+            constraint: "*".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        app.services_add(wl, vec![nginx]).await.unwrap();
+        // Published before the port was reserved.
+        app.service_publish(wl, "nginx", vec!["9050:80".parse().unwrap()], &[])
+            .await
+            .unwrap();
+        std::fs::write(
+            app.org.config_file(),
+            "envs: [dev, prod]\nprefix: wl-acme\nports:\n  reserved: [5432, 9000-9100]\n",
+        )
+        .unwrap();
+
+        let e = app
+            .service_publish(wl, "nginx", vec!["5432:80".parse().unwrap()], &[])
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("ports.reserved: 5432"), "{e}");
+
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert_eq!(plan.blockers.len(), 1, "{:?}", plan.blockers);
+        assert!(
+            plan.blockers[0].contains("host port 9050 is reserved")
+                && plan.blockers[0].contains("9000-9100"),
+            "{}",
+            plan.blockers[0]
+        );
+
+        // Built-in reservations only stop ikit from handing a port out.
+        app.service_publish(wl, "nginx", vec!["80:80".parse().unwrap()], &[9050])
+            .await
+            .unwrap();
+        assert!(app.deploy_plan(wl).await.unwrap().blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ikit_picks_free_host_ports_and_keeps_them() {
+        let (_dir, app, _) = app().await;
+        let app = app.with_exec(Arc::new(FakeDocker::default()));
+        app.target_attach("box", Connection::Local).await.unwrap();
+        let svc = |registry: &str| ServiceRequest {
+            name: None,
+            registry: registry.into(),
+            constraint: "*".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        let (a, b) = ("wl-acme-dev-001", "wl-acme-dev-002");
+        app.workload_create("dev", "box").await.unwrap();
+        app.workload_create("dev", "box").await.unwrap();
+        app.services_add(a, vec![svc("nginx")]).await.unwrap();
+        app.services_add(b, vec![svc("traefik")]).await.unwrap();
+        std::fs::write(
+            app.org.config_file(),
+            "envs: [dev, prod]\nprefix: wl-acme\nports:\n  range: [30000, 30010]\n  reserved: [30001]\n",
+        )
+        .unwrap();
+        let hosts = |s: &ikit_core::ServiceInstance| {
+            s.publish.iter().map(|p| p.to_string()).collect::<Vec<_>>()
+        };
+
+        // Another workload on the target holds 30000; 30001 is reserved.
+        app.service_publish(b, "traefik", vec!["30000:8080".parse().unwrap()], &[])
+            .await
+            .unwrap();
+        let s = app
+            .service_publish(a, "nginx", vec!["80".parse().unwrap()], &[])
+            .await
+            .unwrap();
+        assert_eq!(hosts(&s), ["30002:80"]);
+
+        // Asking again keeps the host port; a bound or UDP request is a new mapping.
+        let s = app
+            .service_publish(
+                a,
+                "nginx",
+                vec![
+                    "80".parse().unwrap(),
+                    "127.0.0.1::80".parse().unwrap(),
+                    "80/udp".parse().unwrap(),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            hosts(&s),
+            ["30002:80", "127.0.0.1:30003:80", "30000:80/udp"]
+        );
+
+        // --auto publishes the declared ports it does not publish yet.
+        let s = app.service_publish_auto(b, "traefik", None).await.unwrap();
+        assert_eq!(hosts(&s), ["30000:8080", "30004:80"]);
+        let again = app.service_publish_auto(b, "traefik", None).await.unwrap();
+        assert_eq!(hosts(&again), hosts(&s));
+
+        // A removed port can be picked again in the same call.
+        let s = app
+            .service_publish(a, "nginx", vec!["8443".parse().unwrap()], &[30002])
+            .await
+            .unwrap();
+        assert!(
+            hosts(&s).contains(&"30002:8443".to_owned()),
+            "{:?}",
+            hosts(&s)
+        );
+
+        // The range runs out.
+        let e = app
+            .service_publish(
+                a,
+                "nginx",
+                (1..=7)
+                    .map(|i| format!("{}", 9000 + i).parse().unwrap())
+                    .collect(),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("no free host port in 30000-30010"),
+            "{e}"
+        );
+        assert!(app.deploy_plan(a).await.unwrap().blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_probe_finds_ports_in_use() {
+        let (_dir, app, _) = app().await;
+        let docker = Arc::new(FakeDocker::default());
+        let app = app.with_exec(docker.clone());
+        app.target_attach("box", Connection::Local).await.unwrap();
+        let wl = "wl-acme-dev-001";
+        app.workload_create("dev", "box").await.unwrap();
+        let traefik = ServiceRequest {
+            name: None,
+            registry: "traefik".into(),
+            constraint: "*".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        app.services_add(wl, vec![traefik]).await.unwrap();
+        let config = "envs: [dev, prod]\nprefix: wl-acme\nports:\n  range: [30000, 30010]\n";
+        std::fs::write(app.org.config_file(), config).unwrap();
+        *docker.listeners.lock().unwrap() = format!(
+            "## ss\n\
+             tcp LISTEN 0 4096 0.0.0.0:30000 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n\
+             tcp LISTEN 0 4096 127.0.0.1:30003 0.0.0.0:*\n\
+             ## docker\n\
+             wl-globex-dev-001|wl-globex-dev-001-web-1|0.0.0.0:30001->80/tcp\n\
+             {wl}|{wl}-traefik-1|0.0.0.0:30002->80/tcp\n"
+        );
+        let publish = |p: &'static str| {
+            let app = &app;
+            async move {
+                app.service_publish(wl, "traefik", vec![p.parse().unwrap()], &[])
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // 30000 (sshd), 30001 (another org's container), 30002 (this workload's old
+        // container) and 30003 (a process) are all skipped when picking.
+        let s = publish("80").await;
+        assert_eq!(s.publish[0].host, 30004);
+
+        // plan blocks host ports in use, naming who holds them.
+        publish("30000:8080").await;
+        publish("30001:9000").await;
+        let blockers = app.deploy_plan(wl).await.unwrap().blockers;
+        assert_eq!(blockers.len(), 2, "{blockers:?}");
+        assert!(
+            blockers[0].contains("in use by `sshd` on the host"),
+            "{}",
+            blockers[0]
+        );
+        assert!(
+            blockers[1].contains("container `wl-globex-dev-001-web-1`"),
+            "{}",
+            blockers[1]
+        );
+
+        // The workload's own running containers do not block it: apply replaces them.
+        app.service_publish(
+            wl,
+            "traefik",
+            vec!["30002:8080".parse().unwrap()],
+            &[30000, 30001],
+        )
+        .await
+        .unwrap();
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+
+        // A probe that fails only warns.
+        *docker.listeners_fail.lock().unwrap() = Some("ss: permission denied".into());
+        let plan = app.deploy_plan(wl).await.unwrap();
+        assert!(plan.blockers.is_empty());
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("could not check the listening ports on `box`")),
+            "{:?}",
+            plan.warnings
+        );
+
+        // ports.probe: false turns it off: the listener on 30000 is not seen.
+        *docker.listeners_fail.lock().unwrap() = None;
+        *docker.listeners.lock().unwrap() =
+            "## ss\ntcp LISTEN 0 1 0.0.0.0:30000 0.0.0.0:*\n".into();
+        std::fs::write(app.org.config_file(), format!("{config}  probe: false\n")).unwrap();
+        let s = publish("81").await;
+        assert!(
+            s.publish
+                .iter()
+                .any(|p| p.host == 30000 && p.container == 81),
+            "{:?}",
+            s.publish
+        );
+    }
+
+    #[tokio::test]
+    async fn orgs_sharing_a_host_see_each_others_claims() {
+        let (_dir, app, _) = app().await;
+        let docker = Arc::new(FakeDocker::default());
+        let app = app.with_exec(docker.clone());
+        app.target_attach("box", Connection::Local).await.unwrap();
+        let wl = "wl-acme-dev-001";
+        app.workload_create("dev", "box").await.unwrap();
+        let nginx = ServiceRequest {
+            name: None,
+            registry: "nginx".into(),
+            constraint: "*".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        app.services_add(wl, vec![nginx]).await.unwrap();
+        std::fs::write(
+            app.org.config_file(),
+            "envs: [dev, prod]\nprefix: wl-acme\nports:\n  range: [30000, 30010]\n",
+        )
+        .unwrap();
+        // globex has claimed 30000 and 30001 but runs nothing; our own old file is ignored.
+        *docker.listeners.lock().unwrap() = "## ss\n## claims\n\
+             @@file /var/lib/ikit/ports/globex.json\n\
+             {\"org\":\"globex\",\"ports\":[\
+             {\"workload\":\"wl-globex-dev-001\",\"service\":\"web\",\"host\":30000,\"container\":80},\
+             {\"workload\":\"wl-globex-dev-001\",\"service\":\"api\",\"host\":30001,\"container\":8080}]}\n\
+             @@file /var/lib/ikit/ports/acme.json\n\
+             {\"org\":\"acme\",\"ports\":[{\"workload\":\"wl-acme-dev-001\",\"service\":\"nginx\",\"host\":30002,\"container\":80}]}\n"
+            .into();
+
+        let s = app
+            .service_publish(wl, "nginx", vec!["80".parse().unwrap()], &[])
+            .await
+            .unwrap();
+        assert_eq!(s.publish[0].host, 30002);
+
+        // Publishing wrote our claim file with the new port.
+        let written = docker.claims.lock().unwrap().last().cloned().unwrap();
+        let claims: ikit_provider::listeners::OrgClaims = serde_json::from_str(&written).unwrap();
+        assert_eq!(claims.org, "acme");
+        assert_eq!(claims.ports.len(), 1);
+        assert_eq!(claims.ports[0].port.to_string(), "30002:80");
+
+        // plan blocks a port another org claimed, even though nothing runs on it.
+        app.service_publish(wl, "nginx", vec!["30001:81".parse().unwrap()], &[])
+            .await
+            .unwrap();
+        let blockers = app.deploy_plan(wl).await.unwrap().blockers;
+        assert_eq!(blockers.len(), 1, "{blockers:?}");
+        assert!(
+            blockers[0].contains("claimed by org `globex` for `api` of wl-globex-dev-001"),
+            "{}",
+            blockers[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn target_ports_report_and_port_drift() {
+        let (_dir, app, _) = app().await;
+        let docker = Arc::new(FakeDocker::default());
+        let app = app.with_exec(docker.clone());
+        app.target_attach("box", Connection::Local).await.unwrap();
+        let wl = "wl-acme-dev-001";
+        app.workload_create("dev", "box").await.unwrap();
+        let nginx = ServiceRequest {
+            name: None,
+            registry: "nginx".into(),
+            constraint: "*".parse().unwrap(),
+            group: Category::Platform,
+            env: BTreeMap::new(),
+        };
+        app.services_add(wl, vec![nginx]).await.unwrap();
+        std::fs::write(
+            app.org.config_file(),
+            "envs: [dev, prod]\nprefix: wl-acme\nports:\n  range: [30000, 30009]\n  reserved: [30009]\n",
+        )
+        .unwrap();
+        app.service_publish(wl, "nginx", vec!["30000:80".parse().unwrap()], &[])
+            .await
+            .unwrap();
+        *docker.listeners.lock().unwrap() = format!(
+            "## ss\n\
+             tcp LISTEN 0 1 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n\
+             tcp LISTEN 0 1 0.0.0.0:30001 0.0.0.0:*\n\
+             ## docker\n\
+             {wl}|{wl}-nginx-1|0.0.0.0:30000->80/tcp\n\
+             ## claims\n\
+             @@file /var/lib/ikit/ports/globex.json\n\
+             {{\"org\":\"globex\",\"ports\":[{{\"workload\":\"wl-globex-dev-001\",\"service\":\"web\",\"host\":30002,\"container\":80}}]}}\n"
+        );
+
+        let r = app.target_ports("box").await.unwrap();
+        let rows: Vec<(u16, &str, &str)> = r
+            .ports
+            .iter()
+            .map(|p| (p.port, p.kind.as_str(), p.holder.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (22, "process", "sshd"),
+                (30000, "service", "wl-acme-dev-001 / nginx"),
+                (30001, "process", "unknown process"),
+                (30002, "org-claim", "org globex: wl-globex-dev-001 / web"),
+            ]
+        );
+        assert_eq!(
+            (r.range.as_str(), r.free_in_range, r.next_free),
+            ("30000-30009", 6, Some(30003))
+        );
+        assert!(
+            r.reserved.contains(&"30009 (config.yaml)".to_owned()),
+            "{:?}",
+            r.reserved
+        );
+        assert_eq!(r.ports[1].workload.as_deref(), Some(wl));
+
+        // Its own container on 30000 is not drift; sshd taking it over would be.
+        let wl_row = app.workload_get(wl).await.unwrap();
+        assert!(app.port_drift(&wl_row).await.unwrap().is_empty());
+        *docker.listeners.lock().unwrap() =
+            "## ss\ntcp LISTEN 0 1 0.0.0.0:30000 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n".into();
+        let drift = app.port_drift(&wl_row).await.unwrap();
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0].0, "nginx");
+        assert!(
+            drift[0].1.contains("in use by `sshd` on the host"),
+            "{}",
+            drift[0].1
+        );
     }
 
     #[tokio::test]

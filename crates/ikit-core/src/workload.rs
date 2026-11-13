@@ -228,6 +228,96 @@ impl FromStr for PublishedPort {
     }
 }
 
+/// A port to publish, with or without a host port: `[BIND:]HOST:CONTAINER[/udp]` asks for that
+/// host port, `CONTAINER[/udp]` or `BIND::CONTAINER[/udp]` lets ikit pick one from
+/// `ports.range` (the second form binding one address, as in Docker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortRequest {
+    pub bind: Option<String>,
+    /// `None`: ikit picks a free host port.
+    pub host: Option<u16>,
+    pub container: u16,
+    pub udp: bool,
+}
+
+impl PortRequest {
+    /// The published port, once the host port is known.
+    pub fn with_host(&self, host: u16) -> PublishedPort {
+        PublishedPort {
+            bind: self.bind.clone(),
+            host,
+            container: self.container,
+            udp: self.udp,
+        }
+    }
+}
+
+impl From<PublishedPort> for PortRequest {
+    fn from(p: PublishedPort) -> Self {
+        Self {
+            bind: p.bind,
+            host: Some(p.host),
+            container: p.container,
+            udp: p.udp,
+        }
+    }
+}
+
+impl fmt::Display for PortRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.host, &self.bind) {
+            (Some(h), _) => self.with_host(h).fmt(f),
+            (None, bind) => {
+                if let Some(b) = bind {
+                    write!(f, "{b}::")?;
+                }
+                write!(f, "{}", self.container)?;
+                if self.udp {
+                    f.write_str("/udp")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl FromStr for PortRequest {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || {
+            format!(
+                "invalid port `{s}` (expected CONTAINER, BIND::CONTAINER or [BIND:]HOST:CONTAINER, \
+                 each with an optional /udp, e.g. 80, 127.0.0.1::5432 or 8080:80)"
+            )
+        };
+        let (rest, udp) = match s.strip_suffix("/udp") {
+            Some(r) => (r, true),
+            None => (s.strip_suffix("/tcp").unwrap_or(s), false),
+        };
+        let port = |p: &str| p.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(invalid);
+        let parts: Vec<&str> = rest.split(':').collect();
+        match parts.as_slice() {
+            [c] => Ok(Self {
+                bind: None,
+                host: None,
+                container: port(c)?,
+                udp,
+            }),
+            [b, "", c] if !b.is_empty() => Ok(Self {
+                bind: Some((*b).to_owned()),
+                host: None,
+                container: port(c)?,
+                udp,
+            }),
+            _ => s
+                .parse::<PublishedPort>()
+                .map(Self::from)
+                .map_err(|_| invalid()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +341,28 @@ mod tests {
         }
         for bad in ["8080", "a:b", "0:80", ":80:80", "1:2:3:4"] {
             assert!(bad.parse::<PublishedPort>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn port_requests_round_trip() {
+        for s in [
+            "80",
+            "53/udp",
+            "127.0.0.1::5432",
+            "8080:80",
+            "127.0.0.1:5432:5432",
+        ] {
+            assert_eq!(s.parse::<PortRequest>().unwrap().to_string(), s);
+        }
+        let r: PortRequest = "127.0.0.1::5432".parse().unwrap();
+        assert_eq!(
+            (r.bind.as_deref(), r.host, r.container),
+            (Some("127.0.0.1"), None, 5432)
+        );
+        assert_eq!(r.with_host(30000).to_string(), "127.0.0.1:30000:5432");
+        for bad in ["0", "a", "::80", ":80", "8080:", "1:2:3:4"] {
+            assert!(bad.parse::<PortRequest>().is_err(), "{bad}");
         }
     }
 

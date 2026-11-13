@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, bail};
 use clap::Subcommand;
-use ikit_core::{PublishedPort, ServiceInstance, VersionConstraint};
+use ikit_core::{PortRequest, ServiceInstance, VersionConstraint};
 use inquire::{Password, PasswordDisplayMode};
 
 use crate::output::{Output, print_json, table};
@@ -35,10 +35,21 @@ pub enum ServiceCmd {
     },
     /// Publish container ports on the target's host, or stop publishing them. Takes effect
     /// on the next `ikit apply`.
+    ///
+    /// Give only the container port (`80`, or `127.0.0.1::5432` for one address) and ikit
+    /// picks a free host port from `ports.range` in config.yaml, skipping ports in use on the
+    /// target and reserved ones. A port it picked stays the same until you remove it.
     Publish {
         name: String,
-        /// [BIND:]HOST:CONTAINER[/udp], e.g. 8080:80 or 127.0.0.1:5432:5432 (repeatable).
-        ports: Vec<PublishedPort>,
+        /// CONTAINER, BIND::CONTAINER or [BIND:]HOST:CONTAINER, each with an optional /udp,
+        /// e.g. 80, 127.0.0.1::5432 or 8080:80 (repeatable).
+        ports: Vec<PortRequest>,
+        /// Publish every port the registry declares for the service, at host ports ikit picks.
+        #[arg(long)]
+        auto: bool,
+        /// With --auto: publish on this address only, e.g. 127.0.0.1.
+        #[arg(long, requires = "auto", value_name = "ADDRESS")]
+        bind: Option<String>,
         /// Host port to stop publishing (repeatable).
         #[arg(long = "remove", value_name = "HOST_PORT")]
         remove: Vec<u16>,
@@ -157,12 +168,16 @@ pub async fn run(ctx: &Ctx, cmd: ServiceCmd) -> anyhow::Result<()> {
         ServiceCmd::Publish {
             name,
             ports,
+            auto,
+            bind,
             remove,
         } => {
-            if ports.is_empty() && remove.is_empty() {
-                bail!("pass a port mapping such as 8080:80, or --remove <host port>");
+            if ports.is_empty() && remove.is_empty() && !auto {
+                bail!(
+                    "pass a port such as 80 or 8080:80, --auto for every declared port, or --remove <host port>"
+                );
             }
-            let (_, version) = app.service_show(&wl, &name).await?;
+            let (before, version) = app.service_show(&wl, &name).await?;
             for p in &ports {
                 if !version.spec.ports.is_empty()
                     && !version
@@ -177,9 +192,23 @@ pub async fn run(ctx: &Ctx, cmd: ServiceCmd) -> anyhow::Result<()> {
                     ));
                 }
             }
-            let svc = app.service_publish(&wl, &name, ports, &remove).await?;
+            let asked: Vec<u16> = ports.iter().filter_map(|p| p.host).collect();
+            let mut svc = app.service_publish(&wl, &name, ports, &remove).await?;
+            if auto {
+                svc = app.service_publish_auto(&wl, &name, bind).await?;
+            }
             if ctx.output == Output::Json {
                 return print_json(&svc);
+            }
+            for p in svc
+                .publish
+                .iter()
+                .filter(|p| !before.publish.contains(p) && !asked.contains(&p.host))
+            {
+                println!(
+                    "Picked host port {} for container port {} ({p}).",
+                    p.host, p.container
+                );
             }
             let ports: Vec<String> = svc.publish.iter().map(ToString::to_string).collect();
             let ports = if ports.is_empty() {

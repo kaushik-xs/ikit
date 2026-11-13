@@ -24,6 +24,7 @@ mod mcp_tokens;
 mod org_secrets;
 mod orgs;
 mod paths;
+mod ports;
 mod profiles;
 mod registry;
 mod registry_auth;
@@ -63,6 +64,7 @@ pub use orgs::{
     org_show, org_use,
 };
 pub use paths::{OrgPaths, Paths};
+pub use ports::{PortEntry, PortReport};
 pub use profiles::AddProfile;
 pub use registry::{AddVersion, Outdated, RegistryFilter};
 pub use registry_edit::{ServiceChanges, VersionChanges, VersionUpdate};
@@ -254,6 +256,16 @@ pub(crate) mod testing {
     use super::*;
 
     /// An app for org `acme` (prefix `wl-acme`) in a temp home, with in-memory secrets.
+    /// Tests run commands for real unless they swap in a fake exec: keep ikit from probing
+    /// this machine's ports or writing port claims under the home. Port tests write their own
+    /// config.
+    pub fn no_port_probe(paths: &Paths, org: &str) {
+        let config = paths.org(org).config_file();
+        let mut yaml = std::fs::read_to_string(&config).unwrap();
+        yaml.push_str("ports:\n  probe: false\n");
+        std::fs::write(&config, yaml).unwrap();
+    }
+
     pub async fn app() -> (tempfile::TempDir, App, Arc<MemorySecretStore>) {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
@@ -267,6 +279,7 @@ pub(crate) mod testing {
         )
         .await
         .unwrap();
+        no_port_probe(&paths, "acme");
         let app = App::open(&paths, "acme", secrets.clone()).await.unwrap();
         (dir, app, secrets)
     }

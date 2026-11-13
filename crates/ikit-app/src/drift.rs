@@ -31,6 +31,8 @@ pub enum DriftKind {
     Extra,
     /// The target's reverse proxy is gone or stopped, or the workload's site is missing.
     Proxy,
+    /// A host port the workload publishes is held by something else on the target.
+    Port,
 }
 
 impl std::fmt::Display for DriftKind {
@@ -43,6 +45,7 @@ impl std::fmt::Display for DriftKind {
             Self::Modified => "modified",
             Self::Extra => "extra",
             Self::Proxy => "proxy",
+            Self::Port => "port",
         })
     }
 }
@@ -99,6 +102,13 @@ impl App {
             report.items.push(DriftItem {
                 service: "*".into(),
                 kind: DriftKind::Proxy,
+                detail,
+            });
+        }
+        for (service, detail) in self.port_drift(&wl).await? {
+            report.items.push(DriftItem {
+                service,
+                kind: DriftKind::Port,
                 detail,
             });
         }

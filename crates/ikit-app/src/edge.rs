@@ -29,7 +29,7 @@ const DNS: Duration = Duration::from_secs(3);
 
 /// How a script gets root on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Root {
+pub(crate) enum Root {
     /// Fails with exit 77 without root or passwordless sudo.
     Required,
     /// Root when available, the login user otherwise (for reading).
@@ -275,7 +275,7 @@ fn check_version(version: &str) -> Result<()> {
 
 impl App {
     /// Runs `script` on the target's host with `sh`, locally or over ssh.
-    async fn edge_sh(
+    pub(crate) async fn edge_sh(
         &self,
         target: &Target,
         script: &str,

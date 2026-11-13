@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::edge::{TlsMode, is_email, is_hostname};
+use crate::ports::{PortDefaults, PortRange};
 use crate::registry::Category;
 use crate::workload::is_env;
 
@@ -20,6 +21,9 @@ pub struct Config {
     /// Defaults for routes through a target's reverse proxy.
     #[serde(default, skip_serializing_if = "EdgeDefaults::is_default")]
     pub edge: EdgeDefaults,
+    /// Host ports ikit hands out to services, and ports it never uses.
+    #[serde(default, skip_serializing_if = "PortDefaults::is_default")]
+    pub ports: PortDefaults,
 }
 
 /// The `edge:` section of `config.yaml`.
@@ -100,6 +104,7 @@ impl Default for Config {
             envs: DEFAULT_ENVS.map(String::from).to_vec(),
             require_digest_envs: default_digest_envs(),
             edge: EdgeDefaults::default(),
+            ports: PortDefaults::default(),
         }
     }
 }
@@ -154,6 +159,19 @@ impl Config {
                 "invalid edge.upstream_ports [{first}, {last}]: use a range above 1023, first <= last"
             ));
         }
+        let [pfirst, plast] = self.ports.range;
+        if pfirst < 1024 || pfirst > plast {
+            return Err(format!(
+                "invalid ports.range [{pfirst}, {plast}]: use a range above 1023, first <= last"
+            ));
+        }
+        let upstream = PortRange::new(first, last);
+        if self.ports.range().overlaps(&upstream) {
+            return Err(format!(
+                "ports.range [{pfirst}, {plast}] overlaps edge.upstream_ports [{first}, {last}]; \
+                 services and routes need separate ranges"
+            ));
+        }
         if self
             .edge
             .auto_routes
@@ -198,6 +216,9 @@ mod tests {
         assert!(bad(|c| c.edge.base_domain = Some("dev".into())));
         assert!(bad(|c| c.edge.upstream_ports = [80, 90]));
         assert!(bad(|c| c.edge.acme_email = Some("ops".into())));
+        assert!(bad(|c| c.ports.range = [80, 90]));
+        assert!(bad(|c| c.ports.range = [40000, 39999]));
+        assert!(bad(|c| c.ports.range = [25000, 35000]));
     }
 
     #[test]
@@ -213,6 +234,19 @@ mod tests {
             !serde_yaml_ng::to_string(&Config::default())
                 .unwrap()
                 .contains("edge")
+        );
+    }
+
+    #[test]
+    fn ports_section_is_optional() {
+        let c: Config =
+            serde_yaml_ng::from_str("envs: [dev]\nports:\n  reserved: [5432]\n").unwrap();
+        assert_eq!(c.ports.range, [10000, 19999]);
+        assert!(c.validate().is_ok());
+        assert!(
+            !serde_yaml_ng::to_string(&Config::default())
+                .unwrap()
+                .contains("ports")
         );
     }
 }

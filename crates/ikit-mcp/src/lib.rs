@@ -232,12 +232,26 @@ pub struct ServiceSetEnvArgs {
 pub struct ServicePublishArgs {
     pub workload: String,
     pub service: String,
-    /// Mappings `[BIND:]HOST:CONTAINER[/udp]`, e.g. `8080:80`.
+    /// Ports to publish: `[BIND:]HOST:CONTAINER[/udp]` for a chosen host port (e.g. `8080:80`),
+    /// or `CONTAINER[/udp]` / `BIND::CONTAINER[/udp]` to let ikit pick a free host port from
+    /// the org's `ports.range` (e.g. `80`, `127.0.0.1::5432`).
     #[serde(default)]
     pub add: Vec<String>,
+    /// Publish every port the registry declares for the service, at host ports ikit picks.
+    #[serde(default)]
+    pub auto: bool,
+    /// With `auto`: publish on this address only, e.g. `127.0.0.1`.
+    #[serde(default)]
+    pub bind: Option<String>,
     /// Host ports to stop publishing.
     #[serde(default)]
     pub remove: Vec<u16>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TargetArgs {
+    /// Target name (see target_list).
+    pub target: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -438,6 +452,42 @@ impl IkitServer {
             targets.retain(|t| used.contains(&t.name));
         }
         json(&targets)
+    }
+
+    #[tool(
+        description = "Show the host ports in use or claimed on a VM target: this org's services and routes, other orgs' claims, and processes and containers listening on the host; plus the free ports left in the org's ports.range. A client limited to some workloads can only ask about their targets, and sees the org's other workloads as `another workload`."
+    )]
+    async fn target_ports(
+        &self,
+        Parameters(args): Parameters<TargetArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let scope = self.scope(&ext);
+        let app = self.app().await?;
+        if scope != Scope::org() {
+            let used = app
+                .workload_list(None)
+                .await
+                .map_err(err)?
+                .into_iter()
+                .any(|w| w.target == args.target && scope.allows(&w.name));
+            if !used {
+                return Err(format!(
+                    "target `{}` is not used by a workload this client may see",
+                    args.target
+                ));
+            }
+        }
+        let mut report = app.target_ports(&args.target).await.map_err(err)?;
+        if scope != Scope::org() {
+            for p in &mut report.ports {
+                if p.workload.as_deref().is_some_and(|w| !scope.allows(w)) {
+                    p.holder = "another workload".to_owned();
+                    p.workload = None;
+                }
+            }
+        }
+        json(&report)
     }
 
     #[tool(
@@ -690,7 +740,7 @@ impl IkitServer {
     }
 
     #[tool(
-        description = "Publish container ports of a service on its target's host, or stop publishing host ports. Needs `mutate` in mcp.yaml. Takes effect on the next apply."
+        description = "Publish container ports of a service on its target's host (ikit picks a free host port when only the container port is given, or for every declared port with `auto`), or stop publishing host ports. Needs `mutate` in mcp.yaml. Takes effect on the next apply."
     )]
     async fn service_publish(
         &self,
@@ -703,11 +753,17 @@ impl IkitServer {
             .iter()
             .map(|p| p.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        json(
-            &app.service_publish(&args.workload, &args.service, add, &args.remove)
+        let mut svc = app
+            .service_publish(&args.workload, &args.service, add, &args.remove)
+            .await
+            .map_err(err)?;
+        if args.auto {
+            svc = app
+                .service_publish_auto(&args.workload, &args.service, args.bind)
                 .await
-                .map_err(err)?,
-        )
+                .map_err(err)?;
+        }
+        json(&svc)
     }
 
     #[tool(
@@ -1227,6 +1283,7 @@ mod tests {
                 "service_publish",
                 "service_set_env",
                 "target_list",
+                "target_ports",
                 "workload_create",
                 "workload_list",
                 "workload_runs",

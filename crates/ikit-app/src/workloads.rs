@@ -182,6 +182,7 @@ impl App {
                 .delete(&self.service_secret_key(name, &s.name))?;
         }
         self.store.workloads().delete(name).await?;
+        self.share_port_claims(&detail.workload.target).await;
         match fs::remove_file(&detail.spec_file) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}

@@ -283,6 +283,8 @@ mod tests {
         let globex = org_create(&paths, gx).await.unwrap();
         assert!(!globex.active);
         assert!(paths.org("globex").state_db().exists());
+        crate::testing::no_port_probe(&paths, "acme");
+        crate::testing::no_port_probe(&paths, "globex");
 
         for (org, target) in [("acme", "vm"), ("globex", "vm")] {
             let app = App::open(&paths, org, secrets.clone()).await.unwrap();
@@ -358,6 +360,7 @@ mod tests {
         let paths = Paths::new(dir.path());
         let secrets = Arc::new(MemorySecretStore::default());
         org_create(&paths, new_org("acme")).await.unwrap();
+        crate::testing::no_port_probe(&paths, "acme");
         let app = App::open(&paths, "acme", secrets.clone()).await.unwrap();
         let profile = AddProfile {
             kind: ProfileKind::Zerotier,

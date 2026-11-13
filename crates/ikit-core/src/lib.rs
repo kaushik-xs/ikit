@@ -44,6 +44,7 @@ pub mod config;
 pub mod edge;
 pub mod hook;
 pub mod network;
+pub mod ports;
 pub mod profile;
 pub mod registry;
 pub mod remote;
@@ -62,6 +63,7 @@ pub use hook::{
     ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia,
 };
 pub use network::{DockerNetwork, Network, NetworkOrigin, is_docker_network_name};
+pub use ports::{PortDefaults, PortRange};
 pub use profile::{FieldSpec, Profile, ProfileError, ProfileKind, ProfileValues, Requirement};
 pub use registry::{
     Category, RegistryEntry, RegistryError, RegistryService, RegistryVersion, ServiceSpec,
@@ -75,7 +77,7 @@ pub use storage::{Backup, Storage, StorageOptions, StorageProvider};
 pub use target::{Connection, Target, TargetKind, TargetStatus, ZtRoute};
 pub use version::{Dependency, VersionConstraint, VersionError};
 pub use workload::{
-    PublishedPort, Run, RunAction, RunResult, ServiceInstance, Workload, WorkloadName,
+    PortRequest, PublishedPort, Run, RunAction, RunResult, ServiceInstance, Workload, WorkloadName,
     WorkloadStatus,
 };
 

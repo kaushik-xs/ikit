@@ -2,13 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ikit_core::registry::unknown_env;
 use ikit_core::{
-    Category, Dependency, PublishedPort, RegistryVersion, ServiceInstance, ServiceSpec,
-    VersionConstraint,
+    Category, Dependency, PortRequest, PublishedPort, RegistryVersion, ServiceInstance,
+    ServiceSpec, VersionConstraint,
 };
 use ikit_state::{NewService, ServiceUpdate};
 use semver::Version;
 use serde::Serialize;
 
+use crate::ports::{Claim, ClaimScope, HostPorts, Owner};
 use crate::{App, AppError, Result};
 
 /// A registry service to add to a workload.
@@ -340,11 +341,16 @@ impl App {
 
     /// Publishes container ports on the target's host (`add`) and stops publishing host
     /// ports (`remove`). Takes effect on the next apply.
+    ///
+    /// A request without a host port gets one from the org's `ports.range`: the first port no
+    /// workload on the target publishes or routes to and that is not reserved. A container
+    /// port the service already publishes (same protocol and bind address) keeps its host
+    /// port, so assigned ports do not move.
     pub async fn service_publish(
         &self,
         workload: &str,
         name: &str,
-        add: Vec<PublishedPort>,
+        add: Vec<PortRequest>,
         remove: &[u16],
     ) -> Result<ServiceInstance> {
         let services = self.services_list(workload).await?;
@@ -362,8 +368,41 @@ impl App {
                 )));
             }
         }
-        for p in add {
+        let mut picker: Option<HostPorts> = None;
+        for req in add {
+            let p = match req.host {
+                Some(host) => req.with_host(host),
+                None => {
+                    if publish.iter().any(|q| {
+                        q.container == req.container && q.udp == req.udp && q.bind == req.bind
+                    }) {
+                        continue;
+                    }
+                    if picker.is_none() {
+                        picker = Some(self.publish_picker(workload, name, &publish).await?);
+                    }
+                    let ports = picker.as_mut().expect("set above");
+                    let range = ports.policy.range();
+                    let host = ports.first_free(range, req.udp).ok_or_else(|| {
+                        AppError::Invalid(format!(
+                            "no free host port in {range} on `{}`; widen `ports.range` in config.yaml",
+                            ports.target
+                        ))
+                    })?;
+                    req.with_host(host)
+                }
+            };
+            self.check_not_reserved(name, &p)?;
             publish.retain(|q| !(q.host == p.host && q.udp == p.udp));
+            if let Some(ports) = picker.as_mut() {
+                ports.claims.push(Claim {
+                    port: p.clone(),
+                    owner: Owner::Service {
+                        workload: workload.to_owned(),
+                        service: name.to_owned(),
+                    },
+                });
+            }
             publish.push(p);
         }
         // Two services cannot publish the same host port.
@@ -393,7 +432,65 @@ impl App {
             .update_service(wl.id, name, update)
             .await?;
         self.write_spec(workload).await?;
+        self.share_port_claims(&wl.target).await;
         Ok(self.service_show(workload, name).await?.0)
+    }
+
+    /// Publishes every port the service's registry version declares that it does not
+    /// publish yet, each at a host port ikit picks (on `bind` only, if given).
+    pub async fn service_publish_auto(
+        &self,
+        workload: &str,
+        name: &str,
+        bind: Option<String>,
+    ) -> Result<ServiceInstance> {
+        let (_, version) = self.service_show(workload, name).await?;
+        if version.spec.ports.is_empty() {
+            return Err(AppError::Invalid(format!(
+                "`{name}` declares no ports in the registry; pass them, e.g. `ikit svc publish {name} 80`"
+            )));
+        }
+        let add = version
+            .spec
+            .ports
+            .iter()
+            .map(|p| PortRequest {
+                bind: bind.clone(),
+                host: None,
+                container: p.container,
+                udp: p.protocol == ikit_core::registry::Protocol::Udp,
+            })
+            .collect();
+        self.service_publish(workload, name, add, &[]).await
+    }
+
+    /// The target's taken host ports, with this service's stored ports replaced by the ones
+    /// being published (`publish`), so ports it stops publishing can be picked again.
+    async fn publish_picker(
+        &self,
+        workload: &str,
+        name: &str,
+        publish: &[PublishedPort],
+    ) -> Result<HostPorts> {
+        let wl = self.workload_get(workload).await?;
+        let scope = ClaimScope {
+            probe: true,
+            ..ClaimScope::default()
+        };
+        let mut ports = self.host_ports(&wl.target, scope).await?;
+        for note in &ports.notes {
+            tracing::warn!("{note}");
+        }
+        let owner = Owner::Service {
+            workload: workload.to_owned(),
+            service: name.to_owned(),
+        };
+        ports.claims.retain(|c| c.owner != owner);
+        ports.claims.extend(publish.iter().map(|p| Claim {
+            port: p.clone(),
+            owner: owner.clone(),
+        }));
+        Ok(ports)
     }
 
     /// The env a service runs with: registry defaults, values set on the instance, and
@@ -457,6 +554,8 @@ impl App {
                 .delete(&self.service_secret_key(workload, &s.name))?;
         }
         self.write_spec(workload).await?;
+        // Their published ports and route upstreams are free now.
+        self.share_port_claims(&wl.target).await;
         Ok(())
     }
 

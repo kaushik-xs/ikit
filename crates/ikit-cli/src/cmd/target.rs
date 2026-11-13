@@ -20,6 +20,9 @@ pub enum TargetCmd {
     Show { name: String },
     /// Check a target is reachable and ready for workloads.
     Test { name: String },
+    /// Show the host ports in use or claimed on a VM target, who holds each, and what is
+    /// still free in `ports.range`.
+    Ports { name: String },
     /// Reach an SSH target over ZeroTier from now on: join it to the network over its
     /// current connection, authorize it, and switch to its ZeroTier address.
     UseZt {
@@ -192,6 +195,39 @@ pub async fn run(ctx: &Ctx, cmd: TargetCmd) -> anyhow::Result<()> {
             println!("{t}");
         }
         TargetCmd::Show { name } => render(ctx, &app.target_show(&name).await?)?,
+        TargetCmd::Ports { name } => {
+            let report = app.target_ports(&name).await?;
+            if ctx.output == Output::Json {
+                return print_json(&report);
+            }
+            let mut t = table(&["PORT", "PROTO", "ADDRESS", "KIND", "HELD BY"]);
+            for p in &report.ports {
+                t.add_row(vec![
+                    p.port.to_string(),
+                    p.protocol.clone(),
+                    p.bind.clone().unwrap_or_else(|| "*".to_owned()),
+                    p.kind.clone(),
+                    p.holder.clone(),
+                ]);
+            }
+            if report.ports.is_empty() {
+                println!("No host ports in use or claimed on {name}.");
+            } else {
+                println!("{t}");
+            }
+            let next = report
+                .next_free
+                .map(|p| format!("; next: {p}"))
+                .unwrap_or_default();
+            println!(
+                "Service ports {}: {} free{next}. Route upstreams: {}.",
+                report.range, report.free_in_range, report.upstream_range
+            );
+            println!("Never handed out: {}.", report.reserved.join(", "));
+            for note in &report.notes {
+                warn(note.clone());
+            }
+        }
         TargetCmd::Test { name } => {
             let target = app.target_test(&name).await?;
             render(ctx, &target)?;
