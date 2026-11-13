@@ -291,7 +291,8 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
 - `upgrade` updates the package for everyone on the host, checks the config with the new
   version and restarts it; if the config is rejected or the service does not come back, the
   previous version is reinstalled.
-- `route add` sends a domain (and an optional path prefix, stripped before proxying) to a service
+- `route add` sends a domain (and an optional path prefix, stripped before proxying unless
+  `--keep-prefix` is given, for apps built with a base path; Caddy only) to a service
   port. ikit publishes that port on `127.0.0.1` at an upstream port from `edge.upstream_ports`
   (default 20000-29999), skipping taken and reserved ports, so it is only reachable through
   the proxy. Without `--host`, the
@@ -336,6 +337,32 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
   `external: true`. ikit never creates or removes it, and `plan` is blocked while it is missing
   on the target. On it, each service also answers to `<workload>-<service>`, which stays
   unique when several workloads share the network.
+- `wl link <provider> --wl <consumer>` lets one workload reach another on the same target, e.g.
+  an app workload its own platform workload. ikit creates `<provider>-link` on the target
+  before either side is applied; the provider's app and platform services join it as
+  `<provider>-<service>` (unique on the engine however many envs share it), and so do the
+  consumer's. Data services never join. Links go one way; `wl links` lists both directions and
+  `wl unlink` removes one. `plan` notes a provider that was never applied.
+- `service:<name>` references (and script `service.<name>` sources) look in the workload
+  first, then in the workloads it links to, so `service:decision-hub.internal_url` becomes
+  `http://wl-regere-dev-002-decision-hub:8080` in the app workload. `service:<wl>/<name>`
+  picks a linked workload when several run the service.
+- App and platform services resolve the workload's (and linked workloads') route hosts to the
+  target's host (`extra_hosts: <host>:host-gateway`), so a service calling its public URL
+  reaches the reverse proxy instead of itself.
+
+### Env values
+
+- A registry env var takes a literal `default`, a `from:` reference (`service:<svc>.host |
+  .port | .port.<name> | .internal_url | .url | .env.<VAR>`, `resource:<need>.<field>`), or a
+  template: `from: "template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}"`.
+  Placeholders are any reference, the service's own `env.<VAR>`, `org`, `workload`, `env`
+  and `service`. A value is secret when any part is. A value set on the instance always wins.
+- `generate: password | hex32 | base64-32` on a secret var: ikit creates the value when the
+  service is added (or upgraded to a version that declares it) and keeps it in the org's
+  secret store, so passwords, keys and peppers are never pasted. `svc set <svc> --generate
+  <VAR>` creates or rotates one.
+- `shm_size` in a version's spec sets the container's `/dev/shm`.
 
 ### Drift
 
@@ -348,7 +375,9 @@ exits 2 on drift, so cron or CI can alert; `ikit apply --force` recreates the co
 ### Hooks
 
 - Phases: `pre-apply` (before files are written; in-service hooks are skipped on the first
-  deploy), `post-apply` (services up and healthy) and `pre-destroy`. Hooks run in the order
+  deploy), `post-data` (data services up and healthy, before app and platform services
+  start: create databases and roles here), `post-apply` (services up and healthy) and
+  `pre-destroy`. Hooks run in the order
   they were added, only when `apply` or `destroy` actually runs; `ikit hook run` runs them on
   demand.
 - A failing SQL, shell or MCP hook fails the run; HTTP hooks only warn. Override with
@@ -389,6 +418,8 @@ See [docs/scripts.md](docs/scripts.md) for the full design and examples.
   `service:<name>`) and `params`: the env vars it reads, mapped to sources such as
   `service.postgres.env.POSTGRES_PASSWORD`, `service.postgres.container`, `target.ssh`,
   `target.dir` or `from.target.ssh`. `input.csv` builds one CSV row per service from its env.
+  `service.<svc>.internal_url` is `http://<host>:<port>`; services of linked workloads
+  resolve too (`host` is then `<workload>-<svc>`).
 - `ikit script run NAME [--to WL] [--from WL] [--param K=V|K=@source] [--csv FILE] [-- ARGS]`
   previews the resolved params (secrets masked), confirms, runs and records the run.
   `--dry-run` only previews. `script list|show|export|history|rm` manage the library.

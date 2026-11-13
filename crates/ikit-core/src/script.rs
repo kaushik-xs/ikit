@@ -474,9 +474,14 @@ mod tests {
             "service.postgres.env.POSTGRES_PASSWORD",
             "from.service.pg-main.port.5432",
             "service.core.version",
+            "service.decision-hub.internal_url",
+            "service.wl-regere-dev-002/decision-hub.host",
         ] {
             let p: SourcePath = s.parse().unwrap();
             assert_eq!(p.to_string(), s);
+        }
+        for bad in ["service./x.host", "service.a/b/c.host", "service.Bad/x.host"] {
+            assert!(bad.parse::<SourcePath>().is_err(), "{bad}");
         }
         let to: SourcePath = "to.target.ssh".parse().unwrap();
         assert_eq!(to, "target.ssh".parse().unwrap());
