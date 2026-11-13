@@ -112,7 +112,7 @@ pub(crate) fn sh(s: &str) -> String {
 }
 
 /// `s` as one shell word: unchanged when it is plainly safe, single-quoted otherwise.
-fn sh_word(s: &str) -> String {
+pub(crate) fn sh_word(s: &str) -> String {
     let safe = !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_./:=@+,".contains(c));

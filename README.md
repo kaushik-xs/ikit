@@ -357,6 +357,21 @@ SQL hooks:
   pass `--allow-changed`. A wiped or restored database re-runs what it no longer has.
 - `ikit plan` lists the scripts the next apply would run.
 
+### Scripts
+
+See [docs/scripts.md](docs/scripts.md) for the full design and examples.
+
+- `ikit script add FILE` stores a script in the org's state (synced with remote state,
+  versioned by checksum). Its `# ikit:` header gives `name`, `runs_on` (`target`, `local` or
+  `service:<name>`) and `params`: the env vars it reads, mapped to sources such as
+  `service.postgres.env.POSTGRES_PASSWORD`, `service.postgres.container`, `target.ssh`,
+  `target.dir` or `from.target.ssh`. `input.csv` builds one CSV row per service from its env.
+- `ikit script run NAME [--to WL] [--from WL] [--param K=V|K=@source] [--csv FILE] [-- ARGS]`
+  previews the resolved params (secrets masked), confirms, runs and records the run.
+  `--dry-run` only previews. `script list|show|export|history|rm` manage the library.
+- The body, env and CSV travel on stdin to `sh -s`; secrets never appear on a command line.
+- `ikit hook add NAME --script SCRIPT --phase post-apply` runs a script around deploys.
+
 ### ZeroTier
 
 - ikit talks to the ZeroTier Central API v2 (New Central). A `zerotier` profile holds a service

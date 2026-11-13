@@ -49,6 +49,7 @@ pub mod profile;
 pub mod registry;
 pub mod remote;
 pub mod resource;
+pub mod script;
 pub mod storage;
 pub mod target;
 pub mod version;
@@ -59,8 +60,8 @@ pub use edge::{
     AcmeCa, AutoRoutes, EdgeConfig, EdgeKind, HostManifest, Redirect, Route, RouteOrigin, TlsMode,
 };
 pub use hook::{
-    Hook, HookAction, HookKind, HookPhase, HookRunRecord, HttpAction, McpAction, ScriptState,
-    ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia,
+    Hook, HookAction, HookKind, HookPhase, HookRunRecord, HttpAction, McpAction, ScriptAction,
+    ScriptState, ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia,
 };
 pub use network::{DockerNetwork, Network, NetworkOrigin, is_docker_network_name};
 pub use ports::{PortDefaults, PortRange};
@@ -72,6 +73,10 @@ pub use remote::{Head, LockInfo, RemoteSpec};
 pub use resource::{
     Backend, BackendOptions, Binding, Identity, Need, NeedOptions, Resource, ResourceApi,
     ResourceKind, ResourceOrigin, ResourceProvider, ResourceStatus,
+};
+pub use script::{
+    CsvInput, Interpreter, RunsOn, Script, ScriptParam, ScriptRunRecord, ScriptSpec, SourcePath,
+    is_env_name,
 };
 pub use storage::{Backup, Storage, StorageOptions, StorageProvider};
 pub use target::{Connection, Target, TargetKind, TargetStatus, ZtRoute};

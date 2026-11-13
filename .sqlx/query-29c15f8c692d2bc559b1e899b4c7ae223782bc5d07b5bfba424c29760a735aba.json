@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", name, description, interpreter, runs_on, body, checksum, spec_json,\n                      source, created_at AS \"created_at: DateTime<Utc>\",\n                      updated_at AS \"updated_at: DateTime<Utc>\"\n               FROM scripts WHERE name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "interpreter",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "runs_on",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "checksum",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "spec_json",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "29c15f8c692d2bc559b1e899b4c7ae223782bc5d07b5bfba424c29760a735aba"
+}

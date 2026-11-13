@@ -277,7 +277,13 @@ pub async fn run(ctx: &Ctx, cmd: ResourceCmd) -> anyhow::Result<()> {
             cmd: None | Some(KeysCmd::List { .. }),
         } => {
             let all = all
-                || matches!(&cmd, ResourceCmd::Keys { cmd: Some(KeysCmd::List { all: true }), .. });
+                || matches!(
+                    &cmd,
+                    ResourceCmd::Keys {
+                        cmd: Some(KeysCmd::List { all: true }),
+                        ..
+                    }
+                );
             let wl = if all { None } else { Some(workload()?) };
             let list = app.identities_list(wl.as_deref()).await?;
             if ctx.output == Output::Json {

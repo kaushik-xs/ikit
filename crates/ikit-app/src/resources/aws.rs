@@ -382,7 +382,9 @@ impl ResourceDriver for AwsDriver {
         }
         match create.send().await {
             Ok(out) => return Ok(out.user().map(|u| u.arn().to_owned()).unwrap_or_default()),
-            Err(e) if e.as_service_error().is_some_and(|s| s.is_entity_already_exists_exception()) => {}
+            Err(e)
+                if e.as_service_error()
+                    .is_some_and(|s| s.is_entity_already_exists_exception()) => {}
             Err(e) => return Err(self.error(&format!("creating IAM user {}", user.name), e)),
         }
         // It exists (under the path, so this lookup is allowed): only use it with the boundary.
@@ -394,7 +396,10 @@ impl ResourceDriver for AwsDriver {
             .await
             .map_err(|e| self.error(&format!("looking up IAM user {}", user.name), e))?;
         let u = out.user().ok_or_else(|| {
-            AppError::Invalid(format!("backend {}: IAM user {} has no details", self.backend, user.name))
+            AppError::Invalid(format!(
+                "backend {}: IAM user {} has no details",
+                self.backend, user.name
+            ))
         })?;
         let boundary = u
             .permissions_boundary()

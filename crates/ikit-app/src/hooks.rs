@@ -16,7 +16,8 @@ use std::time::Duration;
 use ikit_core::hook::{classify, expand};
 use ikit_core::{
     Hook, HookAction, HookKind, HookPhase, HookRunRecord, HttpAction, McpAction, RunResult,
-    ScriptState, ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia, Workload, WorkloadStatus,
+    ScriptAction, ScriptState, ScriptStatus, ShellAction, SqlAction, SqlEngine, SqlVia, Workload,
+    WorkloadStatus, is_env_name,
 };
 use ikit_state::{NewHook, ScriptRun};
 use serde::Serialize;
@@ -70,6 +71,12 @@ pub enum HookRequest {
         /// Env values for the server kept in the keychain, e.g. an API token.
         secret_env: BTreeMap<String, String>,
     },
+    /// A script from the org's library (`ikit script add`).
+    Script {
+        script: String,
+        /// `NAME -> value`, or `NAME -> @source`.
+        params: BTreeMap<String, String>,
+    },
 }
 
 /// Whether a hook keeps something in the keychain (an HTTP URL, or an MCP server's secrets).
@@ -79,12 +86,6 @@ fn has_secret(action: &HookAction) -> bool {
         HookAction::Mcp(a) => !a.secret_env.is_empty(),
         _ => false,
     }
-}
-
-fn is_env_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The text parts of a tool result, for error messages.
@@ -295,6 +296,11 @@ impl App {
                     arguments,
                     secret_env: secret_env.into_keys().collect(),
                 })
+            }
+            HookRequest::Script { script, params } => {
+                let action = ScriptAction { script, params };
+                self.script_hook_check(&action).await?;
+                HookAction::Script(action)
             }
         };
         let fail_on_error = req
@@ -517,6 +523,23 @@ impl App {
                 HookAction::Mcp(action) => {
                     let result = self.run_mcp(&wl.name, hook, action, &vars).await;
                     out.extend(self.finish_step(hook, phase, run_id, "mcp", result).await?);
+                }
+                HookAction::Script(action) => {
+                    let step = format!("script:{}", action.script);
+                    if self.script_hook_waits(action, wl, phase).await? {
+                        out.push(HookOutcome {
+                            hook: hook.name.clone(),
+                            phase,
+                            step,
+                            reason: None,
+                            warning: Some(
+                                "skipped: its service is not running yet (first deploy)".to_owned(),
+                            ),
+                        });
+                        continue;
+                    }
+                    let result = self.run_script_hook(wl, hook, action, phase, run_id).await;
+                    out.extend(self.finish_step(hook, phase, run_id, &step, result).await?);
                 }
             }
         }
