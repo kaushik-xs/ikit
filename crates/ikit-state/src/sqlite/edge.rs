@@ -28,6 +28,7 @@ struct RouteRow {
     origin: String,
     backend_json: Option<Json<RouteBackend>>,
     snippet: Option<String>,
+    keep_prefix: bool,
     created_at: DateTime<Utc>,
 }
 
@@ -49,6 +50,7 @@ impl RouteRow {
             origin: self.origin.parse().map_err(corrupt)?,
             backend: self.backend_json.map_or(RouteBackend::Service, |j| j.0),
             snippet: self.snippet,
+            keep_prefix: self.keep_prefix,
             created_at: self.created_at,
         };
         Ok((self.workload, route))
@@ -89,6 +91,7 @@ impl EdgeRepo for SqliteEdge {
             r#"SELECT r.id AS "id!", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,
                       r.upstream_port, r.origin,
                       r.backend_json AS "backend_json: Json<RouteBackend>", r.snippet,
+                      r.keep_prefix AS "keep_prefix: bool",
                       r.created_at AS "created_at: DateTime<Utc>"
                FROM routes r JOIN workloads w ON w.id = r.workload_id
                WHERE r.workload_id = ? ORDER BY r.host, r.path"#,
@@ -107,6 +110,7 @@ impl EdgeRepo for SqliteEdge {
             r#"SELECT r.id AS "id!", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,
                       r.upstream_port, r.origin,
                       r.backend_json AS "backend_json: Json<RouteBackend>", r.snippet,
+                      r.keep_prefix AS "keep_prefix: bool",
                       r.created_at AS "created_at: DateTime<Utc>"
                FROM routes r JOIN workloads w ON w.id = r.workload_id
                ORDER BY w.name, r.host, r.path"#,
@@ -127,8 +131,8 @@ impl EdgeRepo for SqliteEdge {
         let id = sqlx::query_scalar!(
             r#"INSERT INTO routes
                  (workload_id, service, port, host, path, tls, upstream_port, origin,
-                  backend_json, snippet, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS "id!""#,
+                  backend_json, snippet, keep_prefix, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS "id!""#,
             workload_id,
             new.service,
             new.port,
@@ -139,6 +143,7 @@ impl EdgeRepo for SqliteEdge {
             origin,
             backend,
             new.snippet,
+            new.keep_prefix,
             now,
         )
         .fetch_one(&self.pool)
@@ -158,6 +163,7 @@ impl EdgeRepo for SqliteEdge {
             origin: new.origin,
             backend: new.backend.clone(),
             snippet: new.snippet.map(str::to_owned),
+            keep_prefix: new.keep_prefix,
             created_at: now,
         })
     }
@@ -361,6 +367,7 @@ mod tests {
             origin: RouteOrigin::Auto,
             backend: &RouteBackend::Service,
             snippet: None,
+            keep_prefix: false,
         };
         store.edge().insert_route(wl.id, new).await.unwrap();
         assert!(matches!(

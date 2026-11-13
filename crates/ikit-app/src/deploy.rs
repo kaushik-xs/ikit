@@ -680,6 +680,42 @@ impl App {
                 self.docker_login(&place, &login.host, &login.username, &password)
                     .await?;
             }
+            // Data services first when hooks must prepare them (databases, roles) before
+            // the services that use them start.
+            let services = self.store.workloads().services(wl.id).await?;
+            let data: Vec<&str> = services
+                .iter()
+                .filter(|s| s.group == ikit_core::Category::Data)
+                .map(|s| s.name.as_str())
+                .collect();
+            let has_post_data = self
+                .hook_list(&wl.name)
+                .await?
+                .iter()
+                .any(|h| h.phase == HookPhase::PostData);
+            if has_post_data && !data.is_empty() {
+                let mut args = vec!["up", "--detach", "--wait", "--wait-timeout", "600"];
+                args.extend(&data);
+                let out = self.compose(&place, &wl.name, &args, DEPLOY).await?;
+                if !out.success() {
+                    return Err(failed("docker compose up (data services)", &out));
+                }
+                let data_up = Workload {
+                    status: WorkloadStatus::Applied,
+                    ..wl.clone()
+                };
+                ran.extend(
+                    self.run_phase(
+                        &data_up,
+                        &place,
+                        HookPhase::PostData,
+                        Some(run_id),
+                        allow_changed,
+                        None,
+                    )
+                    .await?,
+                );
+            }
             // A workload with only static or address routes has no containers; Compose
             // refuses `up` without services, and `down` clears any it had before.
             let no_services = self.store.workloads().services(wl.id).await?.is_empty();
@@ -1493,6 +1529,38 @@ mod tests {
             .position(|c| c.ends_with("down --remove-orphans"))
             .unwrap();
         assert!(bye < down, "pre-destroy runs before down");
+    }
+
+    #[tokio::test]
+    async fn post_data_hooks_run_between_the_data_and_the_rest() {
+        let (_dir, app, docker) = setup().await;
+        let wl = "wl-acme-dev-001";
+        app.hook_add(
+            wl,
+            shell_hook("dbs", HookPhase::PostData, "echo make-dbs", Some("redis")),
+        )
+        .await
+        .unwrap();
+        let plan = app.deploy_plan(wl).await.unwrap();
+        let report = app.deploy_apply(&plan, "test", false).await.unwrap();
+        assert_eq!(report.hooks_ran.len(), 1);
+        assert!(
+            report.hooks_ran[0].warning.is_none(),
+            "{:?}",
+            report.hooks_ran
+        );
+
+        let calls = docker.calls.lock().unwrap().clone();
+        let data_up = calls
+            .iter()
+            .position(|c| c.contains("up --detach --wait --wait-timeout 600 redis"))
+            .expect("data services start first");
+        let hook = calls.iter().position(|c| c.contains("make-dbs")).unwrap();
+        let all_up = calls
+            .iter()
+            .position(|c| c.contains("up --detach --remove-orphans"))
+            .unwrap();
+        assert!(data_up < hook && hook < all_up, "{calls:#?}");
     }
 
     #[tokio::test]

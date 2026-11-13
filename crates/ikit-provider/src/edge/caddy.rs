@@ -31,7 +31,9 @@ fn tls_directive(tls: TlsMode, edge: &EdgeConfig) -> Option<String> {
 /// The directives that answer a route's requests, indented by `indent`.
 fn handle_body(r: &Served<'_>, indent: &str) -> String {
     let mut out = String::new();
-    if let Some(path) = r.path {
+    if let Some(path) = r.path
+        && !r.keep_prefix
+    {
         out.push_str(&format!("{indent}uri strip_prefix {path}\n"));
     }
     match &r.handler {
@@ -248,5 +250,24 @@ http://site.acme.com {{
                 .unwrap()
                 .starts_with("\ttls {\n")
         );
+    }
+
+    #[test]
+    fn a_kept_prefix_is_not_stripped() {
+        let mut ui = route("dev.acme.dev", Some("/ui/app1"), 20001, TlsMode::Off);
+        ui.keep_prefix = true;
+        let routes = [ui, route("dev.acme.dev", None, 20002, TlsMode::Off)];
+        let input = SiteInput {
+            org: "acme",
+            workload: "wl-acme-dev-001",
+            routes: &routes,
+            redirects: &[],
+            edge: &edge(EdgeKind::Caddy),
+            static_hashes: &hashes(&routes),
+        };
+        let out = render_site(EdgeKind::Caddy, &input).unwrap();
+        assert!(out.contains("reverse_proxy 127.0.0.1:20001"), "{out}");
+        assert!(!out.contains("strip_prefix"), "{out}");
+        assert!(render_site(EdgeKind::Ferron, &input).is_err());
     }
 }

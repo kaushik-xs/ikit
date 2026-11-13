@@ -39,6 +39,8 @@ pub struct RouteRequest {
     pub spa: bool,
     /// Proxy to this address instead of a service: a port, `host:port` or a URL.
     pub to: Option<String>,
+    /// With `path`: pass the prefix on instead of stripping it (apps under a base path).
+    pub keep_prefix: bool,
 }
 
 /// A workload's routes, redirects and automatic-route settings.
@@ -94,6 +96,9 @@ impl App {
             .transpose()
             .map_err(AppError::Invalid)?
             .flatten();
+        if req.keep_prefix && path.is_none() {
+            return Err(AppError::Invalid("--keep-prefix needs --path".into()));
+        }
         let tls = req.tls.unwrap_or(config.edge.default_tls);
         self.check_host_free(&wl, &host, Some(tls)).await?;
         let upstream_port = self.upstream_port(&wl, &service.name, port).await?;
@@ -107,6 +112,7 @@ impl App {
             origin: RouteOrigin::Manual,
             backend: &RouteBackend::Service,
             snippet: None,
+            keep_prefix: req.keep_prefix,
         };
         let route = self.insert_manual_route(&wl, new).await?;
         self.share_port_claims(&wl.target).await;
@@ -163,6 +169,9 @@ impl App {
             .transpose()
             .map_err(AppError::Invalid)?
             .flatten();
+        if req.keep_prefix && path.is_none() {
+            return Err(AppError::Invalid("--keep-prefix needs --path".into()));
+        }
         let tls = req.tls.unwrap_or(self.config()?.edge.default_tls);
         self.check_host_free(&wl, &host, Some(tls)).await?;
         let new = NewRoute {
@@ -175,6 +184,7 @@ impl App {
             origin: RouteOrigin::Manual,
             backend: &backend,
             snippet: None,
+            keep_prefix: req.keep_prefix,
         };
         self.insert_manual_route(&wl, new).await
     }
@@ -409,6 +419,7 @@ impl App {
                 origin: RouteOrigin::Auto,
                 backend: &RouteBackend::Service,
                 snippet: None,
+                keep_prefix: false,
             };
             match self.store.edge().insert_route(wl.id, new).await {
                 Ok(_) => changed = true,

@@ -114,6 +114,7 @@ pub enum HookCmd {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Phase {
     PreApply,
+    PostData,
     PostApply,
     PreDestroy,
 }
@@ -122,6 +123,7 @@ impl From<Phase> for HookPhase {
     fn from(p: Phase) -> Self {
         match p {
             Phase::PreApply => HookPhase::PreApply,
+            Phase::PostData => HookPhase::PostData,
             Phase::PostApply => HookPhase::PostApply,
             Phase::PreDestroy => HookPhase::PreDestroy,
         }

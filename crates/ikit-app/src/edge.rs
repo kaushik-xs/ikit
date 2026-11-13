@@ -1575,6 +1575,7 @@ mod tests {
                 crate::RouteRequest {
                     service: "web".into(),
                     to: Some("3000".into()),
+                    keep_prefix: false,
                     host: Some("x.acme.invalid".into()),
                     ..Default::default()
                 },
@@ -1608,6 +1609,7 @@ mod tests {
                 wl,
                 crate::RouteRequest {
                     to: Some("3000".into()),
+                    keep_prefix: false,
                     host: Some("site.acme.invalid".into()),
                     path: Some("/api".into()),
                     ..Default::default()

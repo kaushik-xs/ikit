@@ -41,6 +41,10 @@ pub enum RouteCmd {
         /// http(s)://host:port. Needs --host.
         #[arg(long, value_name = "ADDRESS", conflicts_with_all = ["service", "port"])]
         to: Option<String>,
+        /// With --path: pass the prefix on instead of stripping it, for apps served under a
+        /// base path (e.g. a Next.js basePath of /ui/app1). Caddy only.
+        #[arg(long, requires = "path")]
+        keep_prefix: bool,
     },
     /// Add extra proxy directives to a route (`host` or `host/path`), written into its
     /// Caddyfile or ferron.conf block as they are: headers, auth, rate limits, timeouts. The
@@ -106,6 +110,7 @@ pub async fn run(ctx: &Ctx, cmd: RouteCmd) -> anyhow::Result<()> {
             static_dir,
             spa,
             to,
+            keep_prefix,
         } => {
             let other = static_dir.is_some() || to.is_some();
             let service = match service {
@@ -125,6 +130,7 @@ pub async fn run(ctx: &Ctx, cmd: RouteCmd) -> anyhow::Result<()> {
                         static_dir,
                         spa,
                         to,
+                        keep_prefix,
                     },
                 )
                 .await?;

@@ -813,6 +813,7 @@ impl IkitServer {
             static_dir: args.static_dir.map(std::path::PathBuf::from),
             spa: args.spa,
             to: args.to,
+            keep_prefix: false,
         };
         json(&app.route_add(&args.workload, req).await.map_err(err)?)
     }

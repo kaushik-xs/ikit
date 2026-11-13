@@ -387,6 +387,7 @@ pub struct NewRoute<'a> {
     pub origin: RouteOrigin,
     pub backend: &'a RouteBackend,
     pub snippet: Option<&'a str>,
+    pub keep_prefix: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

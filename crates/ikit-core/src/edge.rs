@@ -153,6 +153,9 @@ pub struct Route {
     /// Extra proxy directives written into the route's block as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    /// A path route passes its prefix on instead of stripping it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub keep_prefix: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -469,6 +472,7 @@ mod tests {
             origin: RouteOrigin::Manual,
             backend: RouteBackend::Service,
             snippet: None,
+            keep_prefix: false,
             created_at: Utc::now(),
         };
         assert_eq!(r.url(), "https://api.acme.com/v1");

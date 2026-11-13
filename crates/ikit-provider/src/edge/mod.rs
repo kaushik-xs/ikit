@@ -156,6 +156,8 @@ pub enum EdgeRenderError {
     RoutedAndRedirected(String),
     #[error("the files of static route {0} were not packed")]
     MissingFiles(String),
+    #[error("route {0} keeps its path prefix, which only Caddy supports so far")]
+    KeepPrefixUnsupported(String),
 }
 
 /// What the proxy does with a route's requests.
@@ -170,6 +172,8 @@ pub(crate) enum Handler {
 /// A route as the renderers see it.
 pub(crate) struct Served<'a> {
     pub path: Option<&'a str>,
+    /// Pass the path prefix on instead of stripping it.
+    pub keep_prefix: bool,
     pub handler: Handler,
     pub snippet: Option<&'a str>,
 }
@@ -229,6 +233,7 @@ fn group_by_host<'a>(input: &SiteInput<'a>) -> Result<Vec<HostRoutes<'a>>, EdgeR
                 .map(|r| {
                     Ok(Served {
                         path: r.path.as_deref(),
+                        keep_prefix: r.keep_prefix,
                         handler: handler(input, r)?,
                         snippet: r.snippet.as_deref(),
                     })
@@ -287,6 +292,11 @@ pub fn render_site(kind: EdgeKind, input: &SiteInput<'_>) -> Result<String, Edge
             .collect(),
         redirects: input.redirects.iter().map(|r| r.host.clone()).collect(),
     };
+    if kind == EdgeKind::Ferron
+        && let Some(r) = input.routes.iter().find(|r| r.keep_prefix)
+    {
+        return Err(EdgeRenderError::KeepPrefixUnsupported(r.key()));
+    }
     let body = match kind {
         EdgeKind::Caddy => caddy::render(&hosts, input.redirects, input.edge),
         EdgeKind::Ferron => ferron::render(&hosts, input.redirects, input.edge),
@@ -519,6 +529,7 @@ pub(crate) mod tests {
             origin: RouteOrigin::Manual,
             backend: RouteBackend::Service,
             snippet: None,
+            keep_prefix: false,
             created_at: Utc::now(),
         }
     }
