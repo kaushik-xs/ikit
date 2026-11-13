@@ -129,9 +129,14 @@ enum Command {
     /// Back up and restore database services.
     #[command(subcommand)]
     Backup(cmd::backup::BackupCmd),
-    /// Manage SQL hooks: scripts run in a database service after each apply.
+    /// Manage hooks: SQL scripts, shell commands, HTTP calls, MCP tools and library scripts
+    /// run around the workload's deploys.
     #[command(subcommand)]
     Hook(cmd::hook::HookCmd),
+    /// The org's script library: scripts run against workloads with their env (credentials,
+    /// hosts, containers) resolved from ikit's state.
+    #[command(subcommand)]
+    Script(cmd::script::ScriptCmd),
     /// Serve ikit tools to AI agents over MCP (stdio or HTTP).
     #[command(subcommand)]
     Mcp(cmd::mcp::McpCmd),
@@ -279,6 +284,7 @@ async fn dispatch(ctx: &Ctx, command: Command) -> anyhow::Result<()> {
         Command::Group(c) => cmd::group::run(ctx, c).await,
         Command::Service(c) => cmd::service::run(ctx, c).await,
         Command::Hook(c) => cmd::hook::run(ctx, c).await,
+        Command::Script(c) => cmd::script::run(ctx, c).await,
         Command::Storage(c) => cmd::storage::run(ctx, c).await,
         Command::Backup(c) => cmd::backup::run(ctx, c).await,
         Command::Mcp(c) => cmd::mcp::run(ctx, c).await,

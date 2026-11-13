@@ -33,6 +33,7 @@ mod registry_ops;
 mod remote;
 mod resources;
 mod routes;
+mod scripts;
 pub mod secrets;
 mod services;
 mod storage;
@@ -79,6 +80,10 @@ pub use resources::{
     PENDING_VALUE, ResourceInfo, ResourcePlan, UNBOUND_VALUE, parse_address,
 };
 pub use routes::{RouteList, RouteRequest};
+pub use scripts::{
+    ImportStatus, InputPreview, ResolvedParam, ScriptAddReport, ScriptAddRequest, ScriptPreview,
+    ScriptReport, ScriptRunRequest,
+};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore};
 pub use services::{AddServicesReport, ServiceRequest, UnmetDependency};
 pub use storage::{NewStorageRequest, ObjectEntry};

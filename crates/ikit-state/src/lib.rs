@@ -14,10 +14,11 @@ use ikit_core::{
     Backend, BackendOptions, Backup, Binding, Category, Connection, DockerNetwork, Hook,
     HookAction, HookPhase, HookRunRecord, Identity, Network, NetworkOrigin, Profile, ProfileKind,
     PublishedPort, RegistryEntry, RegistryVersion, Resource, ResourceApi, ResourceOrigin,
-    ResourceProvider, ResourceStatus, Run, RunAction, RunResult, ServiceInstance, SqlEngine,
-    Storage, StorageOptions, StorageProvider, Target, TargetStatus, VersionConstraint, Workload,
-    WorkloadStatus,
+    ResourceProvider, ResourceStatus, Run, RunAction, RunResult, Script, ScriptRunRecord,
+    ServiceInstance, SqlEngine, Storage, StorageOptions, StorageProvider, Target, TargetStatus,
+    VersionConstraint, Workload, WorkloadStatus,
 };
+use ikit_core::{Interpreter, RunsOn, ScriptSpec};
 use semver::Version;
 
 mod sqlite;
@@ -36,6 +37,7 @@ pub trait StateStore: Send + Sync {
     fn networks(&self) -> &dyn NetworkRepo;
     fn edge(&self) -> &dyn EdgeRepo;
     fn resources(&self) -> &dyn ResourceRepo;
+    fn scripts(&self) -> &dyn ScriptRepo;
 }
 
 #[async_trait]
@@ -401,6 +403,52 @@ pub trait HookRepo: Send + Sync {
         hook: Option<&str>,
         limit: i64,
     ) -> Result<Vec<HookRunRecord>>;
+}
+
+#[async_trait]
+pub trait ScriptRepo: Send + Sync {
+    /// Adds the script, or replaces the one with the same name (keeping its id).
+    async fn upsert(&self, new: NewScript<'_>) -> Result<Script>;
+    async fn get(&self, name: &str) -> Result<Option<Script>>;
+    /// By name.
+    async fn list(&self) -> Result<Vec<Script>>;
+    /// Deletes the script and its run history.
+    async fn delete(&self, name: &str) -> Result<bool>;
+    async fn record(&self, script_id: i64, run: ScriptExecution<'_>) -> Result<()>;
+    /// Most recent first, optionally for one script and/or one workload (as either side).
+    async fn history(
+        &self,
+        script: Option<&str>,
+        workload: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ScriptRunRecord>>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewScript<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub interpreter: Interpreter,
+    pub runs_on: &'a RunsOn,
+    pub body: &'a str,
+    pub checksum: &'a str,
+    pub spec: &'a ScriptSpec,
+    pub source: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptExecution<'a> {
+    pub run_id: Option<i64>,
+    pub workload: &'a str,
+    pub from_workload: Option<&'a str>,
+    pub hook: Option<&'a str>,
+    pub checksum: &'a str,
+    /// Resolved params with secret values masked.
+    pub params: &'a BTreeMap<String, String>,
+    pub result: RunResult,
+    pub exit_code: Option<i32>,
+    pub error: Option<&'a str>,
+    pub output_tail: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
