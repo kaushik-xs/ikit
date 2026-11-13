@@ -641,23 +641,30 @@ impl App {
                 self.docker_login(&place, &login.host, &login.username, &password)
                     .await?;
             }
-            let args = [
-                "up",
-                "--detach",
-                "--remove-orphans",
-                "--wait",
-                "--wait-timeout",
-                "600",
-            ];
-            let out = self.compose(&place, &wl.name, &args, DEPLOY).await?;
+            // A workload with only static or address routes has no containers; Compose
+            // refuses `up` without services, and `down` clears any it had before.
+            let no_services = self.store.workloads().services(wl.id).await?.is_empty();
+            let args: &[&str] = if no_services {
+                &["down", "--remove-orphans"]
+            } else {
+                &[
+                    "up",
+                    "--detach",
+                    "--remove-orphans",
+                    "--wait",
+                    "--wait-timeout",
+                    "600",
+                ]
+            };
+            let out = self.compose(&place, &wl.name, args, DEPLOY).await?;
             if !out.success() {
-                return Err(failed("docker compose up", &out));
+                return Err(failed(&format!("docker compose {}", args[0]), &out));
             }
             // Services run with their new keys now; the rotated-out ones can go.
             self.retire_keys(wl).await?;
             // The proxy switches over once the services are up and healthy.
             if let Some(edge) = &plan.edge {
-                self.edge_apply(&target, edge).await?;
+                self.edge_apply(&target, &wl.name, edge).await?;
             }
             // Authorized before post-apply hooks, which may reach the workload over ZeroTier.
             let zerotier = match self.zt_sidecar_network(&wl.name).await? {

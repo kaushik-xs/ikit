@@ -170,8 +170,9 @@ impl Command {
                 NetCmd::Docker(DockerCmd::Attach { .. } | DockerCmd::Detach { .. }) => Write,
             },
             Command::Route(c) => match c {
-                RouteCmd::List => Read,
+                RouteCmd::List | RouteCmd::Snippet { show: true, .. } => Read,
                 RouteCmd::Add { .. }
+                | RouteCmd::Snippet { .. }
                 | RouteCmd::Rm { .. }
                 | RouteCmd::Redirect { .. }
                 | RouteCmd::Unredirect { .. }

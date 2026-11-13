@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT r.id AS \"id!\", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,\n                      r.upstream_port, r.origin, r.created_at AS \"created_at: DateTime<Utc>\"\n               FROM routes r JOIN workloads w ON w.id = r.workload_id\n               ORDER BY w.name, r.host, r.path",
+  "query": "SELECT r.id AS \"id!\", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,\n                      r.upstream_port, r.origin,\n                      r.backend_json AS \"backend_json: Json<RouteBackend>\", r.snippet,\n                      r.created_at AS \"created_at: DateTime<Utc>\"\n               FROM routes r JOIN workloads w ON w.id = r.workload_id\n               WHERE r.workload_id = ? ORDER BY r.host, r.path",
   "describe": {
     "columns": [
       {
@@ -49,13 +49,23 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at: DateTime<Utc>",
+        "name": "backend_json: Json<RouteBackend>",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "snippet",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 11,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       true,
@@ -67,8 +77,10 @@
       false,
       false,
       false,
+      true,
+      true,
       false
     ]
   },
-  "hash": "46762427c9a001cbfb96a9a03657a24ee35011d7f29efc3502e5009e74cf4a98"
+  "hash": "0887408655c853ae80aef7eae0008022e8a893e18d6a38a4372e0ea56c2a2dfc"
 }

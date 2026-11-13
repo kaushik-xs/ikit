@@ -36,6 +36,7 @@ mod routes;
 mod scripts;
 pub mod secrets;
 mod services;
+mod static_files;
 mod storage;
 mod targets;
 mod workloads;

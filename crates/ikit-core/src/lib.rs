@@ -57,7 +57,8 @@ pub mod workload;
 
 pub use config::{AutoRouteDefaults, Config, EdgeDefaults};
 pub use edge::{
-    AcmeCa, AutoRoutes, EdgeConfig, EdgeKind, HostManifest, Redirect, Route, RouteOrigin, TlsMode,
+    AcmeCa, AutoRoutes, EdgeConfig, EdgeKind, HostManifest, Redirect, Route, RouteBackend,
+    RouteOrigin, TlsMode,
 };
 pub use hook::{
     Hook, HookAction, HookKind, HookPhase, HookRunRecord, HttpAction, McpAction, ScriptAction,

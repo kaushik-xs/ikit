@@ -257,7 +257,9 @@ pub struct TargetArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RouteAddArgs {
     pub workload: String,
-    pub service: String,
+    /// Service instance; leave out for a `static_dir` or `to` route.
+    #[serde(default)]
+    pub service: Option<String>,
     /// Domain; default: the org's host template under `edge.base_domain`.
     #[serde(default)]
     pub host: Option<String>,
@@ -270,6 +272,27 @@ pub struct RouteAddArgs {
     /// acme, internal or off; default: the org's edge.default_tls.
     #[serde(default)]
     pub tls: Option<String>,
+    /// Serve the files of this folder on the machine running ikit instead of a service;
+    /// needs `host`.
+    #[serde(default)]
+    pub static_dir: Option<String>,
+    /// With `static_dir`: answer requests for missing files with index.html.
+    #[serde(default)]
+    pub spa: bool,
+    /// Proxy to an address instead of a service: a port on the host, host:port or
+    /// http(s)://host:port; needs `host`.
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RouteSnippetArgs {
+    pub workload: String,
+    /// `host` or `host/path`.
+    pub route: String,
+    /// Proxy directives written into the route's block as they are; leave out to remove.
+    #[serde(default)]
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -767,7 +790,7 @@ impl IkitServer {
     }
 
     #[tool(
-        description = "Route a domain (and optional path prefix) to a service through the target's reverse proxy, with an automatic certificate. The target needs a proxy (`ikit target edge install`). Needs `mutate` in mcp.yaml. Takes effect on the next apply."
+        description = "Route a domain (and optional path prefix) through the target's reverse proxy, with an automatic certificate, to a service port, a folder of static files (`static_dir`, copied to the host on apply) or an address (`to`, e.g. a process on the host). The target needs a proxy (`ikit target edge install`). Needs `mutate` in mcp.yaml. Takes effect on the next apply."
     )]
     async fn route_add(
         &self,
@@ -782,13 +805,32 @@ impl IkitServer {
             .transpose()
             .map_err(err)?;
         let req = ikit_app::RouteRequest {
-            service: args.service,
+            service: args.service.unwrap_or_default(),
             port: args.port,
             host: args.host,
             path: args.path,
             tls,
+            static_dir: args.static_dir.map(std::path::PathBuf::from),
+            spa: args.spa,
+            to: args.to,
         };
         json(&app.route_add(&args.workload, req).await.map_err(err)?)
+    }
+
+    #[tool(
+        description = "Set or remove extra proxy directives (Caddyfile or ferron.conf syntax) on a route, written into its block as they are. The proxy validates them on apply. Needs `mutate` in mcp.yaml. Takes effect on the next apply."
+    )]
+    async fn route_snippet(
+        &self,
+        Parameters(args): Parameters<RouteSnippetArgs>,
+        ext: Extensions,
+    ) -> ToolResult {
+        let app = self.mutable(&self.scope(&ext), &args.workload).await?;
+        json(
+            &app.route_set_snippet(&args.workload, &args.route, args.snippet.as_deref())
+                .await
+                .map_err(err)?,
+        )
     }
 
     #[tool(
@@ -1279,6 +1321,7 @@ mod tests {
                 "route_add",
                 "route_list",
                 "route_remove",
+                "route_snippet",
                 "service_add",
                 "service_publish",
                 "service_set_env",

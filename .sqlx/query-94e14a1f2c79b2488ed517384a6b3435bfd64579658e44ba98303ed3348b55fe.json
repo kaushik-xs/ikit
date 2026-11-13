@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE routes SET snippet = ? WHERE workload_id = ? AND host = ? AND path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "94e14a1f2c79b2488ed517384a6b3435bfd64579658e44ba98303ed3348b55fe"
+}

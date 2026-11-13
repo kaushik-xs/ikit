@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ikit_core::{AutoRoutes, Redirect, Route, UnknownVariant};
+use ikit_core::{AutoRoutes, Redirect, Route, RouteBackend, UnknownVariant};
 use sqlx::SqlitePool;
 use sqlx::types::Json;
 
@@ -26,6 +26,8 @@ struct RouteRow {
     tls: String,
     upstream_port: i64,
     origin: String,
+    backend_json: Option<Json<RouteBackend>>,
+    snippet: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -45,6 +47,8 @@ impl RouteRow {
             tls: self.tls.parse().map_err(corrupt)?,
             upstream_port: port(self.upstream_port)?,
             origin: self.origin.parse().map_err(corrupt)?,
+            backend: self.backend_json.map_or(RouteBackend::Service, |j| j.0),
+            snippet: self.snippet,
             created_at: self.created_at,
         };
         Ok((self.workload, route))
@@ -83,7 +87,9 @@ impl EdgeRepo for SqliteEdge {
         sqlx::query_as!(
             RouteRow,
             r#"SELECT r.id AS "id!", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,
-                      r.upstream_port, r.origin, r.created_at AS "created_at: DateTime<Utc>"
+                      r.upstream_port, r.origin,
+                      r.backend_json AS "backend_json: Json<RouteBackend>", r.snippet,
+                      r.created_at AS "created_at: DateTime<Utc>"
                FROM routes r JOIN workloads w ON w.id = r.workload_id
                WHERE r.workload_id = ? ORDER BY r.host, r.path"#,
             workload_id,
@@ -99,7 +105,9 @@ impl EdgeRepo for SqliteEdge {
         sqlx::query_as!(
             RouteRow,
             r#"SELECT r.id AS "id!", w.name AS workload, r.service, r.port, r.host, r.path, r.tls,
-                      r.upstream_port, r.origin, r.created_at AS "created_at: DateTime<Utc>"
+                      r.upstream_port, r.origin,
+                      r.backend_json AS "backend_json: Json<RouteBackend>", r.snippet,
+                      r.created_at AS "created_at: DateTime<Utc>"
                FROM routes r JOIN workloads w ON w.id = r.workload_id
                ORDER BY w.name, r.host, r.path"#,
         )
@@ -114,11 +122,13 @@ impl EdgeRepo for SqliteEdge {
         let path = new.path.unwrap_or("");
         let tls = new.tls.as_str();
         let origin = new.origin.as_str();
+        let backend = (*new.backend != RouteBackend::Service).then_some(Json(new.backend));
         let now = Utc::now();
         let id = sqlx::query_scalar!(
             r#"INSERT INTO routes
-                 (workload_id, service, port, host, path, tls, upstream_port, origin, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS "id!""#,
+                 (workload_id, service, port, host, path, tls, upstream_port, origin,
+                  backend_json, snippet, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS "id!""#,
             workload_id,
             new.service,
             new.port,
@@ -127,6 +137,8 @@ impl EdgeRepo for SqliteEdge {
             tls,
             new.upstream_port,
             origin,
+            backend,
+            new.snippet,
             now,
         )
         .fetch_one(&self.pool)
@@ -144,6 +156,8 @@ impl EdgeRepo for SqliteEdge {
             tls: new.tls,
             upstream_port: new.upstream_port,
             origin: new.origin,
+            backend: new.backend.clone(),
+            snippet: new.snippet.map(str::to_owned),
             created_at: now,
         })
     }
@@ -152,6 +166,26 @@ impl EdgeRepo for SqliteEdge {
         let path = path.unwrap_or("");
         let result = sqlx::query!(
             "DELETE FROM routes WHERE workload_id = ? AND host = ? AND path = ?",
+            workload_id,
+            host,
+            path,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_route_snippet(
+        &self,
+        workload_id: i64,
+        host: &str,
+        path: Option<&str>,
+        snippet: Option<&str>,
+    ) -> Result<bool> {
+        let path = path.unwrap_or("");
+        let result = sqlx::query!(
+            "UPDATE routes SET snippet = ? WHERE workload_id = ? AND host = ? AND path = ?",
+            snippet,
             workload_id,
             host,
             path,
@@ -325,6 +359,8 @@ mod tests {
             tls: TlsMode::Acme,
             upstream_port: 20000,
             origin: RouteOrigin::Auto,
+            backend: &RouteBackend::Service,
+            snippet: None,
         };
         store.edge().insert_route(wl.id, new).await.unwrap();
         assert!(matches!(
@@ -351,6 +387,50 @@ mod tests {
             ["web.acme.dev", "web.acme.dev/api"]
         );
         assert_eq!(routes[1].origin, RouteOrigin::Manual);
+        assert_eq!(routes[1].backend, RouteBackend::Service);
+
+        let site = RouteBackend::Static {
+            source: "/srv/site".into(),
+            spa: true,
+        };
+        store
+            .edge()
+            .insert_route(
+                wl.id,
+                NewRoute {
+                    host: "docs.acme.dev",
+                    service: "",
+                    port: 0,
+                    upstream_port: 0,
+                    backend: &site,
+                    origin: RouteOrigin::Manual,
+                    ..new
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .edge()
+                .set_route_snippet(wl.id, "docs.acme.dev", None, Some("header X-A b"))
+                .await
+                .unwrap()
+        );
+        let docs = store.edge().routes(wl.id).await.unwrap().remove(0);
+        assert_eq!(docs.backend, site);
+        assert_eq!(docs.snippet.as_deref(), Some("header X-A b"));
+        assert!(
+            !store
+                .edge()
+                .set_route_snippet(wl.id, "nope.acme.dev", None, None)
+                .await
+                .unwrap()
+        );
+        store
+            .edge()
+            .delete_route(wl.id, "docs.acme.dev", None)
+            .await
+            .unwrap();
         let all = store.edge().all_routes().await.unwrap();
         assert_eq!(all[0].0, wl.name);
 

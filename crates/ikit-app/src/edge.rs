@@ -25,6 +25,8 @@ use crate::{App, AppError, ExecOutput, Result};
 /// Installing or upgrading pulls packages.
 const INSTALL: Duration = Duration::from_secs(10 * 60);
 const EDGE: Duration = Duration::from_secs(2 * 60);
+/// Uploading a static route's files.
+const UPLOAD: Duration = Duration::from_secs(15 * 60);
 const DNS: Duration = Duration::from_secs(3);
 
 /// How a script gets root on the host.
@@ -145,6 +147,17 @@ pub struct EdgePlan {
     /// Domains the site answers for, re-checked on the host when it is written.
     #[serde(skip)]
     pub hosts: Vec<String>,
+    /// The packed files of the workload's static routes, uploaded before the site is written.
+    #[serde(skip)]
+    pub statics: Vec<StaticUpload>,
+}
+
+/// One static route's files, packed for the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticUpload {
+    pub route: String,
+    pub hash: String,
+    pub tar: Vec<u8>,
 }
 
 /// What `edge_install` does on a host.
@@ -789,6 +802,28 @@ impl App {
         }
         let file = provider::site_file(&self.org.name, &wl.name);
         let applied = self.read_site(target, &file).await?;
+        let mut statics = Vec::new();
+        for r in &routes {
+            let ikit_core::RouteBackend::Static { source, .. } = &r.backend else {
+                continue;
+            };
+            let dir = std::path::PathBuf::from(source);
+            let packed = tokio::task::spawn_blocking(move || crate::static_files::pack(&dir))
+                .await
+                .map_err(|e| AppError::Invalid(format!("packing static files: {e}")))?;
+            match packed {
+                Ok(p) => statics.push(StaticUpload {
+                    route: r.key(),
+                    hash: p.hash,
+                    tar: p.tar,
+                }),
+                Err(e) => blockers.push(format!("{}: {e}", r.key())),
+            }
+        }
+        let static_hashes: std::collections::BTreeMap<String, String> = statics
+            .iter()
+            .map(|s| (s.route.clone(), s.hash.clone()))
+            .collect();
         let rendered = if wanted {
             // The org's email wins over the one saved on the target when the proxy was set up.
             let edge = EdgeConfig {
@@ -801,9 +836,12 @@ impl App {
                 routes: &routes,
                 redirects: &redirects,
                 edge: &edge,
+                static_hashes: &static_hashes,
             };
             match provider::render_site(config.kind, &input) {
                 Ok(r) => Some(r),
+                // A folder that could not be packed is already a blocker.
+                Err(provider::EdgeRenderError::MissingFiles(_)) => None,
                 Err(e) => {
                     blockers.push(e.to_string());
                     None
@@ -834,7 +872,7 @@ impl App {
                     ));
                 }
             }
-            for r in &routes {
+            for r in routes.iter().filter(|r| r.is_service()) {
                 if h.routes.iter().any(|o| o.upstream == r.upstream_port) {
                     blockers.push(format!(
                         "upstream port {} of {} is used on `{}` by {}; run `ikit route add` again \
@@ -877,7 +915,12 @@ impl App {
         }
 
         let warnings = self.edge_warnings(target, &routes, &redirects).await;
-        let changes = provider::diff_site(applied.as_deref(), rendered.as_deref());
+        // A missing folder leaves nothing to render; that is a blocker, not a removal.
+        let changes = if wanted && rendered.is_none() {
+            vec![]
+        } else {
+            provider::diff_site(applied.as_deref(), rendered.as_deref())
+        };
         let hosts = routes
             .iter()
             .map(|r| r.host.clone())
@@ -893,6 +936,7 @@ impl App {
                 warnings,
                 rendered,
                 hosts,
+                statics,
             }),
             blockers,
         ))
@@ -961,11 +1005,65 @@ impl App {
         }
     }
 
-    /// Puts the planned site file in place (or removes it), checks the config and reloads.
-    pub(crate) async fn edge_apply(&self, target: &Target, plan: &EdgePlan) -> Result<()> {
+    /// Uploads the static routes' files, puts the planned site file in place (or removes
+    /// it), checks the config and reloads, then removes uploads the site no longer uses.
+    pub(crate) async fn edge_apply(
+        &self,
+        target: &Target,
+        workload: &str,
+        plan: &EdgePlan,
+    ) -> Result<()> {
         if plan.changes.is_empty() {
             return Ok(());
         }
+        for upload in &plan.statics {
+            let script = provider::upload_static_script(
+                &self.org.name,
+                workload,
+                &upload.route,
+                &upload.hash,
+            );
+            let out = self
+                .edge_sh(target, &script, Root::Required, Some(&upload.tar), UPLOAD)
+                .await?;
+            self.edge_ok(
+                &format!("uploading the files of {}", upload.route),
+                target,
+                &out,
+            )?;
+        }
+        self.write_planned_site(target, plan).await?;
+        let keep: Vec<(&str, &str)> = plan
+            .statics
+            .iter()
+            .map(|s| (s.route.as_str(), s.hash.as_str()))
+            .collect();
+        self.prune_static(target, workload, &keep).await;
+        Ok(())
+    }
+
+    /// Removes the workload's uploads of static files except `keep`; failures only warn,
+    /// since the site is already live.
+    async fn prune_static(&self, target: &Target, workload: &str, keep: &[(&str, &str)]) {
+        let script = provider::prune_static_script(&self.org.name, workload, keep);
+        match self
+            .edge_sh(target, &script, Root::Required, None, EDGE)
+            .await
+        {
+            Ok(out) if out.code == Some(0) => {}
+            Ok(out) => tracing::warn!(
+                "removing old static files of {workload} on `{}`: {}",
+                target.name,
+                out.stderr.trim()
+            ),
+            Err(e) => tracing::warn!(
+                "removing old static files of {workload} on `{}`: {e}",
+                target.name
+            ),
+        }
+    }
+
+    async fn write_planned_site(&self, target: &Target, plan: &EdgePlan) -> Result<()> {
         let (script, stdin) = match &plan.rendered {
             Some(text) => {
                 let hosts: Vec<&str> = plan.hosts.iter().map(String::as_str).collect();
@@ -1019,7 +1117,9 @@ impl App {
             &format!("removing {workload} from {}", config.kind),
             target,
             &out,
-        )
+        )?;
+        self.prune_static(target, workload, &[]).await;
+        Ok(())
     }
 
     /// Proxy problems for `ikit status --drift`: the proxy is gone or stopped, or the
@@ -1043,13 +1143,51 @@ impl App {
             Some(_) => items.push(format!("{} is not running", config.kind)),
             None => items.push(format!("{} is not installed", config.kind)),
         }
-        if probe.site_of(&self.org.name, &wl.name).is_none() {
-            items.push(format!(
+        match probe.site_of(&self.org.name, &wl.name) {
+            None => items.push(format!(
                 "the site file {} is missing",
                 provider::site_file(&self.org.name, &wl.name)
-            ));
+            )),
+            Some(header) => items.extend(self.missing_static(wl, target, header).await?),
         }
         Ok(items)
+    }
+
+    /// Static routes whose files are gone from the host.
+    async fn missing_static(
+        &self,
+        wl: &Workload,
+        target: &Target,
+        header: &provider::SiteHeader,
+    ) -> Result<Vec<String>> {
+        let roots: Vec<(String, String)> = header
+            .routes
+            .iter()
+            .filter_map(|r| {
+                let hash = r.serve.as_deref()?.strip_prefix("static ")?;
+                Some((
+                    r.key(),
+                    provider::static_root(&self.org.name, &wl.name, &r.key(), hash),
+                ))
+            })
+            .collect();
+        if roots.is_empty() {
+            return Ok(vec![]);
+        }
+        let script: String = roots
+            .iter()
+            .map(|(_, root)| format!("[ -d {0} ] || echo {0}\n", sh(root)))
+            .collect();
+        let out = self
+            .edge_sh(target, &script, Root::IfAvailable, None, EDGE)
+            .await?;
+        self.edge_ok("checking static files", target, &out)?;
+        let gone: Vec<&str> = out.stdout.lines().collect();
+        Ok(roots
+            .into_iter()
+            .filter(|(_, root)| gone.contains(&root.as_str()))
+            .map(|(key, root)| format!("the files of {key} are missing ({root})"))
+            .collect())
     }
 
     /// `target test`'s proxy check.
@@ -1244,6 +1382,8 @@ mod tests {
         pub manifest: std::sync::Mutex<Option<String>>,
         pub sites: std::sync::Mutex<BTreeMap<String, String>>,
         pub scripts: std::sync::Mutex<Vec<String>>,
+        /// Uploads of static files: the script and the tar's size.
+        pub uploads: std::sync::Mutex<Vec<(String, usize)>>,
     }
 
     /// The first site file a script names (skipping the `*.conf` glob).
@@ -1334,6 +1474,13 @@ mod tests {
                 }
                 return ok(format!("previous=v{previous}\nversion=v{version} h1:x\n"));
             }
+            if script.contains("tar -x -o -f -") {
+                self.uploads
+                    .lock()
+                    .unwrap()
+                    .push((script.clone(), stdin.map_or(0, <[u8]>::len)));
+                return ok(String::new());
+            }
             if script.contains("rm -rf /etc/ikit/edge") {
                 *self.manifest.lock().unwrap() = None;
                 return ok(String::new());
@@ -1395,6 +1542,147 @@ mod tests {
         };
         app.services_add(&wl.name, vec![req]).await.unwrap();
         app
+    }
+
+    #[tokio::test]
+    async fn static_and_address_routes_go_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = std::sync::Arc::new(FakeHost::default());
+        let acme = org_app(dir.path(), "acme", host.clone()).await;
+        acme.edge_install("box", req(EdgeKind::Caddy))
+            .await
+            .unwrap();
+        let wl = "wl-acme-dev-001";
+        let site = dir.path().join("dist");
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::write(site.join("index.html"), "<h1>hi</h1>").unwrap();
+
+        // Static and address routes need a domain and no service.
+        let err = acme
+            .route_add(
+                wl,
+                crate::RouteRequest {
+                    static_dir: Some(site.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("needs --host"), "{err}");
+        let err = acme
+            .route_add(
+                wl,
+                crate::RouteRequest {
+                    service: "web".into(),
+                    to: Some("3000".into()),
+                    host: Some("x.acme.invalid".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pick one"), "{err}");
+
+        let r = acme
+            .route_add(
+                wl,
+                crate::RouteRequest {
+                    static_dir: Some(site.clone()),
+                    spa: true,
+                    host: Some("site.acme.invalid".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.backend,
+            ikit_core::RouteBackend::Static {
+                source: std::fs::canonicalize(&site).unwrap().display().to_string(),
+                spa: true
+            }
+        );
+        assert_eq!((r.service.as_str(), r.port, r.upstream_port), ("", 0, 0));
+        let api = acme
+            .route_add(
+                wl,
+                crate::RouteRequest {
+                    to: Some("3000".into()),
+                    host: Some("site.acme.invalid".into()),
+                    path: Some("/api".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(api.target(), "http://127.0.0.1:3000");
+        let err = acme
+            .route_set_snippet(wl, "site.acme.invalid/api", Some("a {"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("open"), "{err}");
+        acme.route_set_snippet(wl, "site.acme.invalid/api", Some("header X-Api yes\n"))
+            .await
+            .unwrap();
+
+        let plan = acme.deploy_plan(wl).await.unwrap();
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        // Neither route publishes a loopback port.
+        assert!(!plan.rendered.compose.contains("127.0.0.1:"));
+        let edge = plan.edge.as_ref().unwrap();
+        assert_eq!(edge.statics.len(), 1);
+        let hash = edge.statics[0].hash.clone();
+        acme.deploy_apply(&plan, "test", false).await.unwrap();
+
+        let uploads = host.uploads.lock().unwrap().clone();
+        assert_eq!(uploads.len(), 1);
+        let root = format!("/var/lib/ikit/edge/www/acme/{wl}/site.acme.invalid/{hash}");
+        assert!(uploads[0].0.contains(&root), "{}", uploads[0].0);
+        assert!(uploads[0].1 > 0);
+        let text = host.sites.lock().unwrap()[&format!("acme__{wl}.conf")].clone();
+        assert!(text.contains(&format!("root * {root}\n")), "{text}");
+        assert!(text.contains("try_files {path} /index.html"), "{text}");
+        assert!(
+            text.contains("reverse_proxy http://127.0.0.1:3000\n\t\theader X-Api yes\n"),
+            "{text}"
+        );
+        let pruned = host
+            .scripts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains(&format!("site.acme.invalid) keep={hash} ;;")));
+        assert!(pruned);
+
+        // Same files: nothing to do. Changed files: a new upload.
+        assert!(!acme.deploy_plan(wl).await.unwrap().needs_apply());
+        std::fs::write(site.join("index.html"), "<h1>v2</h1>").unwrap();
+        let plan = acme.deploy_plan(wl).await.unwrap();
+        let edge = plan.edge.as_ref().unwrap();
+        assert!(
+            matches!(&edge.changes[..], [EdgeChange::Update { site, detail }]
+                if site == "site.acme.invalid" && detail.contains("static files")),
+            "{:?}",
+            edge.changes
+        );
+        acme.deploy_apply(&plan, "test", false).await.unwrap();
+        assert_eq!(host.uploads.lock().unwrap().len(), 2);
+
+        // A folder that is gone blocks the apply instead of removing the site.
+        std::fs::remove_dir_all(&site).unwrap();
+        let plan = acme.deploy_plan(wl).await.unwrap();
+        assert!(
+            plan.blockers.iter().any(|b| b.contains("does not exist")),
+            "{:?}",
+            plan.blockers
+        );
+        assert!(plan.edge.as_ref().unwrap().changes.is_empty());
+
+        // Destroying takes the site and every upload away.
+        acme.route_remove(wl, "site.acme.invalid").await.unwrap();
+        let plan = acme.deploy_plan(wl).await.unwrap();
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert!(plan.edge.as_ref().unwrap().statics.is_empty());
     }
 
     #[tokio::test]

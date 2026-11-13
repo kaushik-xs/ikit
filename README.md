@@ -4,7 +4,9 @@ Infrastructure Kit: a Rust CLI to create, update, destroy and manage infrastruct
 Docker Compose and Kubernetes workloads, cloud blob storage, database backups, idempotent SQL hooks,
 ZeroTier networking, and an MCP server for agents.
 
-See [docs/ikit-implementation-plan.pdf](docs/ikit-implementation-plan.pdf) for the full plan.
+Design notes: [docs/resources.md](docs/resources.md) (service resources) and
+[docs/team.md](docs/team.md) (sharing an org with a team) and
+[docs/ports.md](docs/ports.md) (host ports and reserved ports).
 Done so far: Phase 0 (workspace, state store, `ikit init`, provider profiles), Phase 1 (service
 registry, attached targets, workloads with service groups, orgs) and Phase 2 (Docker Compose
 deploys to local and SSH targets, registry logins, an MCP server) Phase 3 (SQL, shell and HTTP
@@ -42,7 +44,8 @@ ikit wl use gx-uat-001                             # also switches to org globex
 ikit sg add data                                   # interactive picker
 ikit sg add app --services 'orders-api@^1' --with-deps --set orders-api.LOG_LEVEL=debug
 ikit svc upgrade postgres --to '^17'
-ikit svc publish orders-api 8080:8080             # host:container
+ikit svc publish orders-api 8080:8080             # host:container, on every interface
+ikit svc publish postgres 127.0.0.1:5432:5432      # bind:host:container, this host only
 ikit svc publish orders-api 8080                  # container port only: ikit picks a free host port
 ikit svc publish traefik --auto [--bind 127.0.0.1]  # every declared port, at picked host ports
 ikit target ports vm-1                            # host ports in use or claimed, and what is free
@@ -69,7 +72,7 @@ ikit hook list | run [name] [--allow-changed] | history | rm <name>
 ikit profile set aws acme --set region=eu-central-1 --secret secret_access_key
 
 ikit storage add s3 --provider s3 --bucket backups --profile acme       # or azure | gcs | local
-ikit storage add minio --provider s3 --bucket backups --endpoint http://localhost:9000 --profile local
+ikit storage add rustfs --provider s3 --bucket backups --endpoint http://localhost:9000 --profile local
 ikit storage test s3
 ikit backup run postgres [--storage s3] [--keep 7]
 ikit backup list | restore <id> | prune postgres --keep 7 | schedule postgres --cron "0 2 * * *"
@@ -118,6 +121,9 @@ ikit target edge uninstall box [--purge]           # this org leaves; the last o
 ikit route add web --host acme.com                 # https://acme.com → web's `http` port
 ikit route add api --host acme.com --path /api --port 8080
 ikit route add admin --tls internal                # host from edge.host_template; proxy's own CA
+ikit route add --static ./dist --spa --host app.acme.com   # files served by the proxy itself
+ikit route add --to 3000 --host tools.acme.com     # a process on the host (or host:port, a URL)
+ikit route snippet app.acme.com --file headers.caddy   # extra directives in the route's block
 ikit route redirect www.acme.com https://acme.com
 ikit route auto on --groups app                    # a route per app service with an `http` port
 ikit route list | rm acme.com/api | unredirect www.acme.com | auto off
@@ -293,6 +299,23 @@ pinned; `ikit plan` shows why. `ikit registry version pin` resolves the digest w
   `edge.base_domain` in the org's `config.yaml`. TLS modes: `acme` (default; the domain must
   resolve to the host), `internal` (the proxy's own CA, for private or ZeroTier-only hosts) and
   `off`. Envs in `edge.require_tls_envs` (default `[prod]`) refuse `off`.
+- Routes can skip containers. `route add --static <folder> --host <domain>` has the proxy
+  serve a local folder (a build's `dist/`); `--spa` answers requests for missing files with
+  `index.html`. `plan` packs the folder and hashes it. When the files changed, `apply` copies
+  them to `/var/lib/ikit/edge/www/<org>/<workload>/<route>/<hash>/` on the host, then switches
+  the site over to them and removes the previous copy. A folder that is missing on the machine
+  running `plan` blocks the apply (it does not remove the site), so run static deploys from a
+  machine that has the build. `route add --to <port | host:port | http(s)://host:port>
+  --host <domain>` proxies to anything the host can reach, such as a process running on it
+  outside Docker. Neither kind publishes a loopback port. A workload can consist of only such
+  routes and have no services at all.
+- `route snippet <route> --file <file>` (or `-` for stdin) adds directives to the route's block
+  in the Caddyfile or `ferron.conf` exactly as written, e.g. headers, basic auth, rate limits or
+  timeouts. Braces must balance and lines may not start with `# ikit`. The proxy validates the
+  rest on apply and keeps the previous site if the snippet is rejected. `--show` prints the
+  snippet and `--clear` removes it. On Ferron, a whole-host route that shares its domain with
+  path routes is wrapped in an `if_not` guard, so its directives and snippet only apply to
+  requests that no path route takes.
 - `route auto on` keeps a route for every service in the chosen groups that has a registry port
   named `http` (or `--port-name`); routes follow `sg add`, `svc rm` and `svc upgrade`, and one
   removed by hand is not added back. `edge.auto_routes` in `config.yaml` turns this on for new
