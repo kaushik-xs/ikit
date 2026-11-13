@@ -202,6 +202,32 @@ async fn a_writer_whose_lock_was_broken_cannot_overwrite_newer_state() {
 }
 
 #[tokio::test]
+async fn a_read_after_unpushed_changes_reports_only_its_own() {
+    let remote = test_remote();
+    let (_dir, paths) = seeded(&remote).await;
+    let s = Session::begin_with(remote.clone(), paths.org("acme"), false, &opts("list"))
+        .await
+        .unwrap();
+    change(&paths, "nas").await;
+    assert_eq!(s.finish().await.unwrap(), SyncOutcome::Unpushed);
+
+    // The change is still unpushed, but a read that changes nothing says nothing.
+    let s = Session::begin_with(remote.clone(), paths.org("acme"), false, &opts("list"))
+        .await
+        .unwrap();
+    assert_eq!(s.finish().await.unwrap(), SyncOutcome::Unchanged);
+
+    // A write still pushes it.
+    let s = Session::begin_with(remote.clone(), paths.org("acme"), true, &opts("write"))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.finish().await.unwrap(),
+        SyncOutcome::Pushed { generation: 2 }
+    );
+}
+
+#[tokio::test]
 async fn a_read_command_that_changes_state_does_not_push() {
     let remote = test_remote();
     let (_dir, paths) = seeded(&remote).await;
