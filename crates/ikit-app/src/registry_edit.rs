@@ -53,6 +53,10 @@ pub struct VersionChanges {
     pub depends_on: Vec<Dependency>,
     /// Resources, upserted by name.
     pub needs: Vec<Need>,
+    /// `Some(vec![])` clears the command override.
+    pub command: Option<Vec<String>>,
+    /// `Some(None)` clears the replica count.
+    pub replicas: Option<Option<u32>>,
     pub remove_ports: Vec<u16>,
     pub remove_env: Vec<String>,
     pub remove_volumes: Vec<String>,
@@ -66,6 +70,8 @@ impl VersionChanges {
             && self.digest.is_none()
             && self.release_notes.is_none()
             && self.deprecated.is_none()
+            && self.command.is_none()
+            && self.replicas.is_none()
             && self.ports.is_empty()
             && self.env.is_empty()
             && self.volumes.is_empty()
@@ -203,6 +209,12 @@ impl App {
         }
         if let Some(deprecated) = c.deprecated {
             def.deprecated = deprecated;
+        }
+        if let Some(command) = c.command {
+            def.command = command;
+        }
+        if let Some(replicas) = c.replicas {
+            def.replicas = replicas;
         }
 
         remove(&mut def.env, &c.remove_env, "env var", |e| e.name.clone())?;

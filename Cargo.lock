@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "age",
  "async-trait",
@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "semver",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "ikit-app",
@@ -2647,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "reqwest",
@@ -2659,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "ikit-core",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "ikit-state"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
