@@ -25,6 +25,8 @@ string_enum! {
         Sh => "sh",
         Bash => "bash",
         Python3 => "python3",
+        /// SQL run by a database service's own client (`psql` or `mysql`) in its container.
+        Sql => "sql",
     }
 }
 
@@ -34,6 +36,16 @@ impl Interpreter {
         match self {
             Self::Sh | Self::Bash => "sh",
             Self::Python3 => "py",
+            Self::Sql => "sql",
+        }
+    }
+
+    /// Guesses from the file name (`.sql`, `.py`), else from the `#!` line.
+    pub fn guess(file_name: &str, body: &str) -> Self {
+        match file_name.rsplit_once('.').map(|(_, ext)| ext) {
+            Some("sql") => Self::Sql,
+            Some("py") => Self::Python3,
+            _ => Self::from_shebang(body),
         }
     }
 
@@ -344,6 +356,12 @@ pub struct ScriptSpec {
     pub args: Vec<String>,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// SQL scripts: the database to run in (default: the one the service's env configures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// SQL scripts: run the whole script in one transaction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transaction: bool,
 }
 
 fn default_timeout() -> u64 {
@@ -357,6 +375,8 @@ impl Default for ScriptSpec {
             csv: None,
             args: vec![],
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            database: None,
+            transaction: false,
         }
     }
 }
@@ -503,6 +523,12 @@ mod tests {
         );
         assert_eq!(Interpreter::from_shebang("#!/bin/sh\n"), Interpreter::Sh);
         assert_eq!(Interpreter::from_shebang("echo hi\n"), Interpreter::Sh);
+        assert_eq!(
+            Interpreter::guess("grants.sql", "#!/bin/sh"),
+            Interpreter::Sql
+        );
+        assert_eq!(Interpreter::guess("x.py", ""), Interpreter::Python3);
+        assert_eq!(Interpreter::guess("x", "#!/bin/bash\n"), Interpreter::Bash);
     }
 
     #[test]

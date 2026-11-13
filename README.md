@@ -370,6 +370,9 @@ See [docs/scripts.md](docs/scripts.md) for the full design and examples.
   previews the resolved params (secrets masked), confirms, runs and records the run.
   `--dry-run` only previews. `script list|show|export|history|rm` manage the library.
 - The body, env and CSV travel on stdin to `sh -s`; secrets never appear on a command line.
+- `.sql` files are scripts too: they run in a database service with its own client (`psql`
+  or `mysql`), get their params as SQL variables (`:'NAME'`, `@NAME`), and can run in one
+  transaction (`transaction: true`) or another database (`database:`, `--database`).
 - `ikit hook add NAME --script SCRIPT --phase post-apply` runs a script around deploys.
 
 ### ZeroTier

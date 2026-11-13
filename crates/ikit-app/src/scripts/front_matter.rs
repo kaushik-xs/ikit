@@ -15,6 +15,18 @@
 //! The header starts at a `# ikit:` line among the file's leading comments and runs through
 //! the comment lines after it whose text is indented (or empty), so a regular comment that
 //! follows ends it. Each line loses its `#` and one space and the result is parsed as YAML.
+//!
+//! SQL scripts use `--` comments the same way:
+//!
+//! ```sql
+//! -- ikit:
+//! --   name: grant-readonly
+//! --   runs_on: service:postgres
+//! --   database: core
+//! --   params:
+//! --     RO_PASSWORD: service.core.env.RO_PASSWORD
+//! CREATE ROLE readonly LOGIN PASSWORD :'RO_PASSWORD';
+//! ```
 
 use std::collections::BTreeMap;
 
@@ -34,6 +46,8 @@ pub(crate) struct Header {
     pub csv: Option<CsvInput>,
     pub args: Vec<String>,
     pub timeout: Option<u64>,
+    pub database: Option<String>,
+    pub transaction: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +69,8 @@ struct RawHeader {
     #[serde(default)]
     args: Vec<String>,
     timeout: Option<u64>,
+    database: Option<String>,
+    transaction: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -74,23 +90,25 @@ struct RawCsv {
 
 pub(crate) const DEFAULT_CSV_HEADER: &str = "db_name,db_user,db_password";
 
-/// The header's YAML text, if the file has one.
+/// The header's YAML text, if the file has one: `# ikit:` or, for SQL, `-- ikit:`.
 fn header_text(body: &str) -> Option<String> {
     let mut lines = body.lines().enumerate();
-    let start = loop {
+    let (start, prefix) = loop {
         let (i, line) = lines.next()?;
         let t = line.trim();
-        if t == "# ikit:" || t == "#ikit:" {
-            break i;
+        match t {
+            "# ikit:" | "#ikit:" => break (i, "#"),
+            "-- ikit:" | "--ikit:" => break (i, "--"),
+            _ => {}
         }
         // Only the leading comments are searched.
-        if !t.is_empty() && !t.starts_with('#') {
+        if !t.is_empty() && !t.starts_with('#') && !t.starts_with("--") {
             return None;
         }
     };
     let mut yaml = vec!["ikit:".to_owned()];
     for line in body.lines().skip(start + 1) {
-        let Some(text) = line.trim_start().strip_prefix('#') else {
+        let Some(text) = line.trim_start().strip_prefix(prefix) else {
             break;
         };
         let text = text.strip_prefix(' ').unwrap_or(text);
@@ -130,6 +148,8 @@ pub(crate) fn parse(body: &str) -> Result<Option<Header>, String> {
         csv,
         args: raw.args,
         timeout: raw.timeout,
+        database: raw.database,
+        transaction: raw.transaction,
     }))
 }
 
@@ -235,6 +255,19 @@ set -euo pipefail
         assert_eq!(csv.header, DEFAULT_CSV_HEADER);
         assert_eq!(csv.services, Some(Category::App));
         assert!(csv.arg);
+    }
+
+    #[test]
+    fn parses_sql_headers() {
+        let body = "-- ikit:\n--   name: grants\n--   runs_on: service:postgres\n--   database: core\n--   transaction: true\n--   params:\n--     PW: service.core.env.DB_PASSWORD\n-- Grants for the read-only role.\nGRANT SELECT ON ALL TABLES IN SCHEMA public TO ro;\n";
+        let h = parse(body).unwrap().unwrap();
+        assert_eq!(h.name.as_deref(), Some("grants"));
+        assert_eq!(h.database.as_deref(), Some("core"));
+        assert_eq!(h.transaction, Some(true));
+        assert_eq!(h.params[0].name, "PW");
+        // A `#` line does not continue a `--` header.
+        let mixed = "-- ikit:\n--   name: a\n#   runs_on: target\n";
+        assert_eq!(parse(mixed).unwrap().unwrap().runs_on, None);
     }
 
     #[test]

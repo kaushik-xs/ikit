@@ -25,7 +25,7 @@ pub enum ScriptCmd {
         /// service:<name> (inside that service's container).
         #[arg(long, value_name = "WHERE")]
         runs_on: Option<String>,
-        /// sh, bash or python3 (default: from the #! line).
+        /// sh, bash, python3 or sql (default: sql for .sql files, else from the #! line).
         #[arg(long)]
         interpreter: Option<Interpreter>,
         #[arg(long)]
@@ -71,6 +71,9 @@ pub enum ScriptCmd {
         /// Use this CSV file instead of the rows built from the services.
         #[arg(long, value_name = "FILE")]
         csv: Option<PathBuf>,
+        /// SQL scripts: the database to run in (default: the script's, else the service's).
+        #[arg(long)]
+        database: Option<String>,
         /// Seconds before the script is stopped (default: its header's, or 600).
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u64>,
@@ -225,6 +228,12 @@ pub async fn run(ctx: &Ctx, cmd: ScriptCmd) -> anyhow::Result<()> {
             println!("  runs on:     {}", s.runs_on);
             println!("  interpreter: {}", s.interpreter);
             println!("  timeout:     {}s", s.spec.timeout_secs);
+            if let Some(db) = &s.spec.database {
+                println!("  database:    {db}");
+            }
+            if s.spec.transaction {
+                println!("  transaction: yes (the whole script)");
+            }
             if !s.spec.args.is_empty() {
                 println!("  args:        {}", s.spec.args.join(" "));
             }
@@ -290,6 +299,7 @@ pub async fn run(ctx: &Ctx, cmd: ScriptCmd) -> anyhow::Result<()> {
             from,
             params,
             csv,
+            database,
             timeout,
             dry_run,
             yes,
@@ -312,6 +322,7 @@ pub async fn run(ctx: &Ctx, cmd: ScriptCmd) -> anyhow::Result<()> {
                 args,
                 timeout: timeout.map(Duration::from_secs),
                 expected_checksum: None,
+                database,
             };
             let preview = app.script_preview(&req).await?;
             if dry_run {

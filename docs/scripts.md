@@ -1,6 +1,6 @@
 # Scripts
 
-The script store is an org-level library of shell (or Python) scripts that ikit runs against
+The script store is an org-level library of shell, Python or SQL scripts that ikit runs against
 any workload. A script declares the env vars it reads and where each value comes from. ikit
 resolves those values from its own state at run time: targets, workloads, service instances,
 published ports and keychain secrets. Scripts therefore carry no hostnames, container names,
@@ -25,7 +25,7 @@ against any workload, on demand or from a hook.
 | Storage | `crates/ikit-state/migrations/sqlite/0016_scripts.sql`, `src/sqlite/scripts.rs` | Tables `scripts` (body, checksum, spec) and `script_runs` (history). |
 | Header parsing | `crates/ikit-app/src/scripts/front_matter.rs` | Reads the `# ikit:` header on import. |
 | Resolution | `crates/ikit-app/src/scripts/resolve.rs` | Turns sources into values; builds the CSV input; the base `IKIT_*` env. |
-| Execution | `crates/ikit-app/src/scripts/engine.rs` | Builds the program fed to `sh -s`. |
+| Execution | `crates/ikit-app/src/scripts/engine.rs` | Builds the program fed to `sh -s`, including SQL variables and the client command for SQL scripts. |
 | Use cases | `crates/ikit-app/src/scripts/mod.rs` | `script_add`, `script_preview`, `script_run`, history, the hook step. |
 | CLI | `crates/ikit-cli/src/cmd/script.rs` | `ikit script ...`, and `ikit hook add --script` in `cmd/hook.rs`. |
 
@@ -68,6 +68,10 @@ ends. A long script shows nothing until then.
 | `service:<name>` | Inside that service's running container | `docker compose -p <workload> exec -T <name> sh -s` (over ssh for ssh targets) | A temp folder, removed afterwards. The workload must be applied. |
 | `local` | The machine running ikit | `sh -s` | A temp folder, removed afterwards. Uses your own ssh agent and `~/.ssh/config`. |
 
+SQL scripts always run in a database service, `runs_on: service:<name>`. They run like any
+service script, but the last step runs the container's own client instead of an interpreter.
+See [SQL scripts](#sql-scripts).
+
 The script's stdin is `/dev/null`. Scripts must not prompt. Pass flags such as `-y` in `args`,
 and use `docker compose exec -T` inside scripts.
 
@@ -101,7 +105,9 @@ lines after it whose text is indented, so a regular comment that follows ends it
 | `name` | A slug. Required here or via `--name`. |
 | `description` | Shown in `script list` and `script show`. |
 | `runs_on` | `target`, `local` or `service:<name>`. Required here or via `--runs-on`. |
-| `interpreter` | `sh`, `bash` or `python3`. Defaults to what the `#!` line says, else `sh`. |
+| `interpreter` | `sh`, `bash`, `python3` or `sql`. Defaults to `sql` for `.sql` files and `python3` for `.py` files, else to what the `#!` line says, else `sh`. |
+| `database` | SQL scripts only: the database to run in. Defaults to the one the service's env configures. |
+| `transaction` | SQL scripts only: `true` runs the whole script in one transaction. Default `false`. |
 | `params` | Env var name to source. See below. |
 | `input.csv` | A CSV built from the services' env. See below. |
 | `args` | Arguments always passed, before any given at run time. |
@@ -174,6 +180,51 @@ becomes one row, sorted by service name. Services missing a column are listed as
 preview. A value containing a comma, quote or newline fails the run. `ikit script run --csv FILE`
 replaces the generated rows with a file of your own.
 
+## SQL scripts
+
+A `.sql` file is a script of its own kind. It runs inside a Postgres or MySQL service of the
+workload, with that container's client and credentials, the same way `--via exec` SQL hooks
+do. No database port needs to be published, and no password leaves the container's env.
+
+```sql
+-- ikit:
+--   name: app-role
+--   description: Create the app's role and database
+--   runs_on: service:postgres
+--   database: postgres
+--   params:
+--     APP_USER: service.core.env.DB_USER
+--     APP_PASSWORD: service.core.env.DB_PASSWORD
+CREATE ROLE :"APP_USER" LOGIN PASSWORD :'APP_PASSWORD';
+CREATE DATABASE :"APP_USER" OWNER :"APP_USER";
+```
+
+- **Header.** It uses `--` comments, with the same keys as `#` headers. `runs_on` must be
+  `service:<name>`, and the service must be a database ikit knows: `postgres`, `postgresql`,
+  `timescaledb`, `postgis`, `mysql` or `mariadb`, by registry name. SQL scripts take no
+  `input.csv` and no `args`.
+- **Params become SQL variables.** Each param and each `IKIT_*` value is set before the script
+  runs. Postgres uses psql variables: `:'NAME'` is a quoted literal, `:"NAME"` a quoted
+  identifier, and `:NAME` the raw text. MySQL uses user variables: `@NAME`. Quoting is done by
+  ikit, so values with quotes, backslashes or newlines arrive intact.
+- **Secrets.** Variables are written to a private file in a temp folder in the container,
+  read before the script, and deleted afterwards. They never appear on a command line or as
+  env vars.
+- **Database.** The client connects to `database` if the header sets it, else to the one the
+  container's env configures (`POSTGRES_DB`, or `MYSQL_DATABASE`). `ikit script run --database
+  NAME` overrides both for one run.
+- **Errors.** Postgres runs with `ON_ERROR_STOP=1`, and MySQL stops at the first error by
+  default. The first failing statement fails the run.
+- **Transactions.** `transaction: true` runs the whole script in one transaction
+  (`psql --single-transaction`, or `START TRANSACTION`/`COMMIT` for MySQL), so a failure rolls
+  everything back. Leave it off for statements that cannot run in a transaction, such as
+  Postgres `CREATE DATABASE`. MySQL commits DDL implicitly either way.
+- **Runs every time.** Unlike SQL hooks, a SQL script has no ledger. It runs whenever it is
+  run, so write it to be safe to repeat (`IF NOT EXISTS`, `ON CONFLICT`). Use SQL hooks for
+  migrations that must run once per database.
+- **Output.** Query results are printed like any script output: `\pset`, `\echo` and other
+  psql commands work.
+
 ## Commands
 
 ```bash
@@ -193,7 +244,7 @@ ikit script export NAME > file.sh
 ```
 
 ```bash
-ikit script run NAME [--to WL] [--from WL] [--param K=V|K=@source]... [--csv FILE] [--timeout SECS] [--dry-run] [-y] [-- ARGS...]
+ikit script run NAME [--to WL] [--from WL] [--param K=V|K=@source]... [--csv FILE] [--database DB] [--timeout SECS] [--dry-run] [-y] [-- ARGS...]
 ```
 
 ```bash
@@ -316,6 +367,109 @@ ikit script run copy-prod-dump --from wl-regere-prod-001 --to wl-regere-dev-001 
 The run is recorded on the dev workload, which stays locked while it runs. The prod workload is
 only read.
 
+### Walkthrough: databases for wl-regere-dev-001
+
+These two scripts were run against `wl-regere-dev-001`'s postgres. In that workload, `authrs`,
+`core`, `launchpad` and `workflow-engine` each keep their credentials in a secret
+`DATABASE_URL`. They all connect as `postgres`, each to its own database.
+
+`app-dbs.sql` reads the four URLs from the org's secrets and creates any role or database that
+is missing. It is safe to re-run:
+
+```sql
+-- ikit:
+--   name: app-dbs
+--   description: Create each app's role and database from its DATABASE_URL (safe to re-run)
+--   runs_on: service:postgres
+--   database: postgres
+--   params:
+--     AUTHRS_URL: service.authrs.env.DATABASE_URL
+--     CORE_URL: service.core.env.DATABASE_URL
+--     LAUNCHPAD_URL: service.launchpad.env.DATABASE_URL
+--     WORKFLOW_URL: service.workflow-engine.env.DATABASE_URL
+--
+-- One row per app: the user, password and database in its connection URL.
+CREATE TEMP TABLE app_urls AS
+SELECT app, m[1] AS usr, m[2] AS pwd, m[3] AS db
+FROM (VALUES ('authrs', :'AUTHRS_URL'), ('core', :'CORE_URL'),
+             ('launchpad', :'LAUNCHPAD_URL'), ('workflow-engine', :'WORKFLOW_URL')) AS u(app, url),
+     regexp_match(url, '^postgres(?:ql)?://([^:]+):([^@]+)@[^/]+/([^?]+)') AS m;
+
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', usr, pwd)
+FROM app_urls WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = usr)
+GROUP BY usr, pwd \gexec
+SELECT format('CREATE DATABASE %I OWNER %I', db, min(usr))
+FROM app_urls WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = db)
+GROUP BY db \gexec
+
+\pset footer off
+SELECT app, usr AS role, db AS database FROM app_urls ORDER BY app;
+```
+
+`check-app-logins.sh` runs inside the postgres container and logs in with each URL:
+
+```sh
+#!/bin/sh
+# ikit:
+#   name: check-app-logins
+#   description: Log in with each app's DATABASE_URL from inside postgres
+#   runs_on: service:postgres
+#   params:
+#     AUTHRS_URL: service.authrs.env.DATABASE_URL
+#     CORE_URL: service.core.env.DATABASE_URL
+#     LAUNCHPAD_URL: service.launchpad.env.DATABASE_URL
+#     WORKFLOW_URL: service.workflow-engine.env.DATABASE_URL
+fail=0
+for pair in "authrs AUTHRS_URL" "core CORE_URL" "launchpad LAUNCHPAD_URL" "workflow-engine WORKFLOW_URL"; do
+  set -- $pair
+  url=$(eval echo "\$$2")
+  if out=$(psql "$url" -XAtc "select current_user || ' @ ' || current_database()" 2>&1); then
+    echo "ok    $1: $out"
+  else
+    echo "FAIL  $1: $(echo "$out" | tail -1)"; fail=1
+  fi
+done
+exit $fail
+```
+
+The commands, in order:
+
+```bash
+ikit wl use wl-regere-dev-001
+```
+
+```bash
+ikit script add app-dbs.sql
+```
+
+```bash
+ikit script add check-app-logins.sh
+```
+
+```bash
+ikit script run app-dbs --dry-run
+```
+
+```bash
+ikit script run app-dbs
+```
+
+```bash
+ikit script run check-app-logins
+```
+
+```bash
+ikit hook add app-dbs --script app-dbs --phase post-apply
+```
+
+```bash
+ikit script history
+```
+
+The dry-run shows the four URLs as `<secret>`. The run prints one row per app (app, role,
+database), and the check prints `ok  core: postgres @ core` and so on. As a post-apply hook,
+`app-dbs` makes sure every app's database exists after each deploy.
+
 ## Limits
 
 - The container name assumes Compose's `<workload>-<service>-1`. It is wrong for scaled
@@ -324,5 +478,6 @@ only read.
 - A `script run` that changes state holds the org's remote lock while the script runs, like
   `hook run` and `apply`.
 - Kubernetes targets are not supported.
+- SQL scripts have no ledger: they run every time, unlike SQL hooks.
 - Not yet built: MCP tools for scripts, streaming output, and params composed from several
   sources (for example a URL built from user, password and host).

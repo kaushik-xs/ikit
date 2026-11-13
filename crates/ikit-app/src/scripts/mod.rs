@@ -12,7 +12,7 @@ use std::time::Duration;
 use ikit_core::script::DEFAULT_TIMEOUT_SECS;
 use ikit_core::{
     Hook, HookAction, HookPhase, Interpreter, RunAction, RunResult, RunsOn, Script, ScriptAction,
-    ScriptParam, ScriptRunRecord, ScriptSpec, Workload, WorkloadStatus,
+    ScriptParam, ScriptRunRecord, ScriptSpec, SqlEngine, Workload, WorkloadStatus,
 };
 use ikit_state::{NewRun, NewScript, ScriptExecution};
 use serde::Serialize;
@@ -21,7 +21,7 @@ use crate::deploy::{Place, sh};
 use crate::exec::ExecOutput;
 use crate::hooks_sql::checksum;
 use crate::{App, AppError, Result};
-use engine::{Payload, WorkDir};
+use engine::{Payload, SqlRun, WorkDir};
 use resolve::{Ctx, ParamValue, base_env, check_param_name, parse_overrides};
 pub use resolve::{InputPreview, ResolvedParam};
 
@@ -74,6 +74,8 @@ pub struct ScriptRunRequest {
     pub timeout: Option<Duration>,
     /// Refuse to run if the script changed since this checksum was previewed.
     pub expected_checksum: Option<String>,
+    /// SQL scripts: the database to run in, instead of the script's own.
+    pub database: Option<String>,
 }
 
 /// What a run would do, with secrets masked.
@@ -118,6 +120,7 @@ struct Prepared {
     input_arg: bool,
     args: Vec<String>,
     timeout: Duration,
+    sql: Option<SqlRun>,
 }
 
 fn invalid(e: impl std::fmt::Display) -> AppError {
@@ -138,6 +141,42 @@ fn masked_params(params: &[ResolvedParam]) -> BTreeMap<String, String> {
         .iter()
         .map(|p| (p.name.clone(), p.value.clone()))
         .collect()
+}
+
+fn check_database(db: &str) -> Result<()> {
+    if db.is_empty()
+        || !db
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(invalid(format!("invalid database name `{db}`")));
+    }
+    Ok(())
+}
+
+/// What only SQL scripts may (and must) declare.
+fn validate_kind(spec: &ScriptSpec, interpreter: Interpreter, runs_on: &RunsOn) -> Result<()> {
+    if interpreter == Interpreter::Sql {
+        if !matches!(runs_on, RunsOn::Service(_)) {
+            return Err(invalid(
+                "SQL scripts run in a database service: use runs_on: service:<name>",
+            ));
+        }
+        if spec.csv.is_some() {
+            return Err(invalid("SQL scripts take no input.csv"));
+        }
+        if !spec.args.is_empty() {
+            return Err(invalid("SQL scripts take no args"));
+        }
+        if let Some(db) = &spec.database {
+            check_database(db)?;
+        }
+    } else if spec.database.is_some() || spec.transaction {
+        return Err(invalid(
+            "`database` and `transaction` are for SQL scripts (.sql files, or interpreter: sql)",
+        ));
+    }
+    Ok(())
 }
 
 /// Validates what a script declares; shared by import and by flags.
@@ -210,10 +249,14 @@ impl App {
             .ok_or_else(|| invalid("say where the script runs: add `runs_on: target|local|service:<name>` to its header or pass --runs-on"))?
             .parse()
             .map_err(invalid)?;
-        let interpreter = req
-            .interpreter
-            .or(header.interpreter)
-            .unwrap_or_else(|| Interpreter::from_shebang(&body));
+        let interpreter = req.interpreter.or(header.interpreter).unwrap_or_else(|| {
+            let file_name = req
+                .file
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Interpreter::guess(&file_name, &body)
+        });
         let mut params = header.params;
         for (pname, spec) in parse_overrides(&req.params)? {
             let (from, value) = match spec {
@@ -238,8 +281,11 @@ impl App {
             csv: header.csv,
             args: header.args,
             timeout_secs: header.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS),
+            database: header.database,
+            transaction: header.transaction.unwrap_or(false),
         };
         validate_spec(&spec)?;
+        validate_kind(&spec, interpreter, &runs_on)?;
         let description = req.description.or(header.description).unwrap_or_default();
         let sum = checksum(&body);
         let source = std::fs::canonicalize(&req.file)
@@ -368,6 +414,7 @@ impl App {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prepare(
         &self,
         script: &Script,
@@ -376,6 +423,7 @@ impl App {
         csv: Option<&str>,
         extra_args: &[String],
         timeout: Option<Duration>,
+        database: Option<&str>,
     ) -> Result<Prepared> {
         if let RunsOn::Service(svc) = &script.runs_on
             && !ctx.primary.services.iter().any(|s| &s.name == svc)
@@ -385,6 +433,48 @@ impl App {
                 ctx.primary.wl.name, script.name
             )));
         }
+        let sql = if script.interpreter == Interpreter::Sql {
+            if csv.is_some() {
+                return Err(invalid("SQL scripts take no CSV input"));
+            }
+            if !extra_args.is_empty() {
+                return Err(invalid("SQL scripts take no arguments"));
+            }
+            let RunsOn::Service(svc) = &script.runs_on else {
+                return Err(invalid("SQL scripts run in a database service"));
+            };
+            let instance = ctx
+                .primary
+                .services
+                .iter()
+                .find(|s| &s.name == svc)
+                .expect("checked above");
+            let engine = SqlEngine::detect(&instance.registry_service).ok_or_else(|| {
+                invalid(format!(
+                    "script `{}` is SQL, but `{svc}` ({}) is not a database service ikit knows (postgres or mysql)",
+                    script.name, instance.registry_service
+                ))
+            })?;
+            let database = database
+                .map(str::to_owned)
+                .or_else(|| script.spec.database.clone());
+            if let Some(db) = &database {
+                check_database(db)?;
+            }
+            Some(SqlRun {
+                engine,
+                database,
+                transaction: script.spec.transaction,
+            })
+        } else {
+            if database.is_some() {
+                return Err(invalid(format!(
+                    "--database is for SQL scripts; `{}` is {}",
+                    script.name, script.interpreter
+                )));
+            }
+            None
+        };
         let (params_env, params) = self.resolve_params(ctx, &script.spec, overrides).await?;
         let (input, input_preview) = match (csv, &script.spec.csv) {
             (Some(content), _) => {
@@ -431,6 +521,7 @@ impl App {
             env: &env,
             args: &args,
             workdir: WorkDir::Here,
+            sql: sql.as_ref(),
         };
         let p = &ctx.primary;
         let location = match &script.runs_on {
@@ -440,7 +531,17 @@ impl App {
                 p.target.connection.describe(),
                 p.dir.as_deref().unwrap_or("?")
             ),
-            RunsOn::Service(s) => format!("service `{s}` of {}, in a temp folder", p.wl.name),
+            RunsOn::Service(s) => match &sql {
+                Some(run) => format!(
+                    "service `{s}` of {}, with its {} client",
+                    p.wl.name,
+                    match run.engine {
+                        SqlEngine::Postgres => "psql",
+                        SqlEngine::Mysql => "mysql",
+                    }
+                ),
+                None => format!("service `{s}` of {}, in a temp folder", p.wl.name),
+            },
             RunsOn::Local => "this machine, in a temp folder".to_owned(),
         };
         Ok(Prepared {
@@ -462,6 +563,7 @@ impl App {
             input_arg,
             args,
             timeout: Duration::from_secs(timeout_secs),
+            sql,
         })
     }
 
@@ -485,6 +587,7 @@ impl App {
             env: &prepared.env,
             args: &prepared.args,
             workdir,
+            sql: prepared.sql.as_ref(),
         });
         let stdin = Some(program.as_bytes());
         let timeout = prepared.timeout;
@@ -542,6 +645,7 @@ impl App {
                 req.csv.as_deref(),
                 &req.args,
                 req.timeout,
+                req.database.as_deref(),
             )
             .await?
             .preview)
@@ -599,6 +703,7 @@ impl App {
                         req.csv.as_deref(),
                         &req.args,
                         req.timeout,
+                        req.database.as_deref(),
                     )
                     .await?;
                 let out = self.execute(&script, &ctx, &prepared).await?;
@@ -713,7 +818,7 @@ impl App {
                 .script_ctx(wl.clone(), None, Some(phase), run_id)
                 .await?;
             let prepared = self
-                .prepare(&script, &ctx, &overrides, None, &[], None)
+                .prepare(&script, &ctx, &overrides, None, &[], None, None)
                 .await?;
             let out = self.execute(&script, &ctx, &prepared).await?;
             Ok::<_, AppError>((prepared, out))
@@ -1354,6 +1459,106 @@ echo "creating in $PGCONTAINER"
             app.script_show("create-db").await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn sql_scripts_run_in_the_database_container() {
+        let (dir, app, rec) = setup().await;
+        let wl = "wl-acme-dev-001";
+        let body = "-- ikit:\n--   name: grants\n--   runs_on: service:postgres\n--   database: core\n--   transaction: true\n--   params:\n--     PGPASS: service.postgres.env.POSTGRES_PASSWORD\n--     DB_OWNER: service.core.env.DB_USER\nALTER ROLE :\"DB_OWNER\" PASSWORD :'PGPASS';\n";
+        let added = add(&app, &dir, "grants.sql", body).await.script;
+        assert_eq!(added.interpreter, Interpreter::Sql);
+        assert_eq!(added.file_name(), "grants.sql");
+        assert_eq!(added.spec.database.as_deref(), Some("core"));
+        assert!(added.spec.transaction);
+
+        let preview = app.script_preview(&run_req("grants")).await.unwrap();
+        assert_eq!(
+            preview.command,
+            "psql -d core --single-transaction -f scripts/grants.sql"
+        );
+        assert!(preview.location.contains("psql"), "{}", preview.location);
+
+        // Service scripts need the workload deployed.
+        set_applied(&app, wl).await;
+        let mut req = run_req("grants");
+        req.database = Some("app".into());
+        let report = app.script_run(&req, "test").await.unwrap();
+        assert!(report.ok);
+        let (program, args, stdin) = rec.calls().last().unwrap().clone();
+        assert_eq!(program, "ssh");
+        assert!(args.last().unwrap().ends_with("exec -T postgres sh -s"));
+        assert!(!args.iter().any(|a| a.contains("pg-s3cret")), "{args:?}");
+        for line in [
+            "\\set PGPASS 'pg-s3cret'\n",
+            "\\set DB_OWNER 'core_user'\n",
+            "\\set IKIT_WORKLOAD 'wl-acme-dev-001'\n",
+            "--single-transaction -U \"${POSTGRES_USER:-postgres}\" -d 'app' -f 'scripts/grants.vars.sql' -f 'scripts/grants.sql'",
+        ] {
+            assert!(stdin.contains(line), "{line} missing from:\n{stdin}");
+        }
+        assert!(!stdin.contains("export PGPASS"), "{stdin}");
+
+        // SQL scripts take no args or CSV.
+        let mut req = run_req("grants");
+        req.args = vec!["x".into()];
+        let e = app.script_preview(&req).await.unwrap_err();
+        assert!(e.to_string().contains("no arguments"), "{e}");
+        let mut req = run_req("grants");
+        req.database = Some("bad name".into());
+        let e = app.script_preview(&req).await.unwrap_err();
+        assert!(e.to_string().contains("invalid database"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn sql_scripts_are_checked_on_import_and_run() {
+        let (dir, app, _) = setup().await;
+        let path = dir.path().join("x.sql");
+        std::fs::write(&path, "SELECT 1;\n").unwrap();
+        let req = |runs_on: &str| ScriptAddRequest {
+            file: path.clone(),
+            name: Some("x".into()),
+            runs_on: Some(runs_on.into()),
+            ..Default::default()
+        };
+        let e = app.script_add(req("target")).await.unwrap_err();
+        assert!(e.to_string().contains("service:<name>"), "{e}");
+        // A header-less .sql file is SQL by its extension.
+        let added = app.script_add(req("service:web")).await.unwrap().script;
+        assert_eq!(added.interpreter, Interpreter::Sql);
+        let e = app.script_preview(&run_req("x")).await.unwrap_err();
+        assert!(e.to_string().contains("not a database service"), "{e}");
+
+        for (file, body, needle) in [
+            (
+                "csv.sql",
+                "-- ikit:\n--   name: c\n--   runs_on: service:postgres\n--   input:\n--     csv: { columns: [A] }\nSELECT 1;\n",
+                "no input.csv",
+            ),
+            (
+                "db.sh",
+                "# ikit:\n#   name: d\n#   runs_on: target\n#   database: core\necho\n",
+                "for SQL scripts",
+            ),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, body).unwrap();
+            let e = app
+                .script_add(ScriptAddRequest {
+                    file: path,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(e.to_string().contains(needle), "{file}: {e}");
+        }
+
+        // --database only applies to SQL scripts.
+        add(&app, &dir, "create-db.sh", CREATE_DB).await;
+        let mut req = run_req("create-db");
+        req.database = Some("core".into());
+        let e = app.script_preview(&req).await.unwrap_err();
+        assert!(e.to_string().contains("--database is for SQL"), "{e}");
     }
 
     /// The whole path with a real shell, on a local target.
