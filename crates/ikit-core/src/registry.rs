@@ -48,6 +48,13 @@ pub struct ServiceSpec {
     /// Buckets, queues, … the service needs; created per workload by `ikit apply`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<Need>,
+    /// Overrides the image's command, e.g. `["python", "/app/worker.py"]` for a worker built
+    /// on the same image as its API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// Containers to run for each instance (compose `deploy.replicas`); unset means one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +166,12 @@ impl ServiceSpec {
                     e.name
                 ));
             }
+        }
+        if self.replicas == Some(0) {
+            return Err("replicas must be at least 1".to_owned());
+        }
+        if self.command.first().is_some_and(|c| c.trim().is_empty()) {
+            return Err("command must start with a program".to_owned());
         }
         let mut needs = BTreeSet::new();
         for n in &self.needs {
@@ -310,6 +323,10 @@ pub struct VersionDef {
     pub depends_on: Vec<Dependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<Need>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
 }
 
 impl VersionDef {
@@ -322,6 +339,8 @@ impl VersionDef {
             resources,
             depends_on,
             needs,
+            command,
+            replicas,
         } = spec;
         Self {
             version,
@@ -336,6 +355,8 @@ impl VersionDef {
             resources,
             depends_on,
             needs,
+            command,
+            replicas,
         }
     }
 
@@ -348,6 +369,8 @@ impl VersionDef {
             resources: self.resources.clone(),
             depends_on: self.depends_on.clone(),
             needs: self.needs.clone(),
+            command: self.command.clone(),
+            replicas: self.replicas,
         }
     }
 }
@@ -515,6 +538,22 @@ pub enum RegistryError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_and_replicas_round_trip_and_validate() {
+        let spec: ServiceSpec =
+            serde_yaml_ng::from_str("command: [python, /app/worker.py]\nreplicas: 3\n").unwrap();
+        assert_eq!(spec.command, ["python", "/app/worker.py"]);
+        assert_eq!(spec.replicas, Some(3));
+        assert!(spec.validate().is_ok());
+        let def = VersionDef::new(Version::new(0, 0, 0), "img".into(), spec.clone());
+        assert_eq!(def.spec(), spec);
+
+        let zero = ServiceSpec { replicas: Some(0), ..Default::default() };
+        assert!(zero.validate().is_err());
+        let blank = ServiceSpec { command: vec![" ".into()], ..Default::default() };
+        assert!(blank.validate().is_err());
+    }
+
     use super::*;
 
     const YAML: &str = r#"

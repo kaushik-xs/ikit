@@ -80,6 +80,10 @@ pub enum RenderError {
     Empty(String),
     #[error("service name `{0}` is reserved for the ZeroTier sidecar; rename the service")]
     Reserved(String),
+    #[error(
+        "service `{0}` publishes host ports and runs {1} replicas; replicas would fight over the same port (unpublish it with `ikit svc publish`)"
+    )]
+    ReplicasPublished(String, u32),
 }
 
 #[derive(Serialize)]
@@ -153,7 +157,10 @@ struct DependsOn {
 
 #[derive(Serialize)]
 struct Deploy {
-    resources: DeployResources,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replicas: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resources: Option<DeployResources>,
 }
 
 #[derive(Serialize)]
@@ -425,7 +432,7 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
             };
         }
 
-        let ports = inst
+        let ports: Vec<String> = inst
             .publish
             .iter()
             .map(|p| {
@@ -468,7 +475,7 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
             retries: h.retries,
         });
 
-        let deploy = s.spec.resources.as_ref().and_then(|r| {
+        let resources = s.spec.resources.as_ref().and_then(|r| {
             let mut limits = BTreeMap::new();
             if let Some(cpu) = &r.cpu {
                 limits.insert("cpus", cpu.clone());
@@ -476,10 +483,17 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
             if let Some(mem) = &r.memory {
                 limits.insert("memory", mem.clone());
             }
-            (!limits.is_empty()).then_some(Deploy {
-                resources: DeployResources { limits },
-            })
+            (!limits.is_empty()).then_some(DeployResources { limits })
         });
+        // One container is compose's default; only write replicas when there are more.
+        let replicas = s.spec.replicas.filter(|&n| n > 1);
+        if let Some(n) = replicas
+            && !ports.is_empty()
+        {
+            return Err(RenderError::ReplicasPublished(inst.name.clone(), n));
+        }
+        let deploy = (replicas.is_some() || resources.is_some())
+            .then_some(Deploy { replicas, resources });
 
         let mut service_networks: BTreeMap<String, ServiceNetwork> = reachable_groups(inst.group)
             .iter()
@@ -527,7 +541,7 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                     _ => inst.image.clone(),
                 },
                 restart: "unless-stopped",
-                command: vec![],
+                command: s.spec.command.iter().map(|c| escape(c)).collect(),
                 network_mode: None,
                 networks: service_networks,
                 cap_add: vec![],
@@ -770,6 +784,41 @@ pub(crate) mod tests {
         assert_eq!(api["deploy"]["resources"]["limits"]["memory"], "256M");
         assert_eq!(api["labels"]["ikit.registry"], "orders-api@1.4.2");
         assert_eq!(r.images, ["postgres:16.6", "ghcr.io/acme/orders-api:1.4.2"]);
+    }
+
+    #[test]
+    fn command_and_replicas_render_for_workers() {
+        let mut input = sample();
+        let pg = &mut input.services[0];
+        pg.spec.command = vec!["postgres".into(), "-c".into(), "max_connections=$N".into()];
+        pg.spec.replicas = Some(3);
+        let c = yaml(&render(&input).unwrap().compose);
+        let pg = &c["services"]["postgres"];
+        assert_eq!(pg["command"][0], "postgres");
+        assert_eq!(pg["command"][2], "max_connections=$$N");
+        assert_eq!(pg["deploy"]["replicas"], 3);
+        assert!(pg["deploy"].get("resources").is_none());
+        let api = &c["services"]["orders-api"];
+        assert!(api.get("command").is_none());
+        assert!(api["deploy"].get("replicas").is_none());
+    }
+
+    #[test]
+    fn one_replica_is_left_to_compose() {
+        let mut input = sample();
+        input.services[0].spec.replicas = Some(1);
+        let c = yaml(&render(&input).unwrap().compose);
+        assert!(c["services"]["postgres"].get("deploy").is_none());
+    }
+
+    #[test]
+    fn replicas_with_published_ports_are_refused() {
+        let mut input = sample();
+        input.services[1].spec.replicas = Some(2);
+        assert_eq!(
+            render(&input).unwrap_err(),
+            RenderError::ReplicasPublished("orders-api".into(), 2)
+        );
     }
 
     #[test]
