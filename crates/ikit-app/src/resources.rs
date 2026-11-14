@@ -705,7 +705,14 @@ impl App {
                     .await?
                     .ok_or_else(|| self.unbound(wl, &r))?,
             };
-            let backend = self.resource_backend_show(&backend).await?;
+            let backend = match self.resource_backend_show(&backend).await {
+                Ok(b) => b,
+                Err(e) if recheck => {
+                    tracing::warn!("could not check {}: {e}", r.address());
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let options = specs
                 .iter()
                 .find(|(n, ..)| *n == r.service)
@@ -724,13 +731,25 @@ impl App {
                 options: &options,
                 tags: &tags,
             };
-            let outputs = self.resource_driver(&backend).await?.ensure(&want).await?;
+            let ensured = async {
+                let outputs = self.resource_driver(&backend).await?.ensure(&want).await?;
+                let region = self.backend_access(&backend).await?.region;
+                Ok::<_, AppError>((outputs, region))
+            }
+            .await;
+            let (outputs, region) = match ensured {
+                Ok(v) => v,
+                // Checking a ready resource is best effort: a deploy-only machine has no
+                // provisioning credentials, and must still be able to apply.
+                Err(e) if recheck => {
+                    tracing::warn!("could not check {}: {e}", r.address());
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             r.outputs = known_outputs(r.api, &r.external_id);
             r.outputs.extend(outputs);
-            r.outputs.insert(
-                "region".to_owned(),
-                self.backend_access(&backend).await?.region,
-            );
+            r.outputs.insert("region".to_owned(), region);
             r.backend = Some(backend.name);
             if recheck && before == (r.outputs.clone(), r.backend.clone()) {
                 continue;
