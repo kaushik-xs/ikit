@@ -480,7 +480,11 @@ mod tests {
             let p: SourcePath = s.parse().unwrap();
             assert_eq!(p.to_string(), s);
         }
-        for bad in ["service./x.host", "service.a/b/c.host", "service.Bad/x.host"] {
+        for bad in [
+            "service./x.host",
+            "service.a/b/c.host",
+            "service.Bad/x.host",
+        ] {
             assert!(bad.parse::<SourcePath>().is_err(), "{bad}");
         }
         let to: SourcePath = "to.target.ssh".parse().unwrap();

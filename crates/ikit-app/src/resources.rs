@@ -684,17 +684,20 @@ impl App {
         Ok((plans, blockers))
     }
 
-    /// Creates the workload's pending resources. Each is recorded as soon as it exists, so a
-    /// failure part-way leaves the rest pending for the next apply. Returns the addresses
-    /// created.
+    /// Creates the workload's pending resources, and brings back (or in line) the ready ones
+    /// ikit created, in case they were deleted since. Adopted resources are left alone. Each
+    /// is recorded as soon as it exists, so a failure part-way leaves the rest pending for the
+    /// next apply. Returns the addresses created, or whose outputs changed.
     pub(crate) async fn ensure_resources(&self, wl: &Workload) -> Result<Vec<String>> {
         let services = self.store.workloads().services(wl.id).await?;
         let specs = self.specs_for(&services).await?;
         let mut created = Vec::new();
         for mut r in self.store.resources().list(Some(wl.id)).await? {
-            if r.status != ResourceStatus::Pending || r.orphaned {
+            let recheck = r.status == ResourceStatus::Ready && r.origin == ResourceOrigin::Created;
+            if r.orphaned || !(r.status == ResourceStatus::Pending || recheck) {
                 continue;
             }
+            let before = (r.outputs.clone(), r.backend.clone());
             let backend = match &r.backend {
                 Some(b) => b.clone(),
                 None => self
@@ -729,6 +732,9 @@ impl App {
                 self.backend_access(&backend).await?.region,
             );
             r.backend = Some(backend.name);
+            if recheck && before == (r.outputs.clone(), r.backend.clone()) {
+                continue;
+            }
             r.status = ResourceStatus::Ready;
             self.store
                 .resources()

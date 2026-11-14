@@ -2016,6 +2016,26 @@ services:
     }
 
     #[tokio::test]
+    async fn apply_brings_back_a_created_resource_that_was_deleted() {
+        let (_dir, app, _docker, driver) = setup_sim().await;
+        let wl = "wl-acme-dev-001";
+        add_backends(&app).await;
+        let plan = app.deploy_plan(wl).await.unwrap();
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        let queue = "wl-acme-dev-001-sim-jobs";
+        assert!(driver.items.lock().unwrap().contains_key(queue));
+
+        // Someone deletes the queue (or a mock backend restarts and forgets it).
+        driver.items.lock().unwrap().remove(queue);
+        let plan = app.deploy_plan(wl).await.unwrap();
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        assert!(
+            driver.items.lock().unwrap().contains_key(queue),
+            "the next apply recreates it"
+        );
+    }
+
+    #[tokio::test]
     async fn resources_are_created_on_apply_and_passed_to_services() {
         let (_dir, app, _docker, driver) = setup_sim().await;
         let wl = "wl-acme-dev-001";
