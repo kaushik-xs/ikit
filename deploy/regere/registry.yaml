@@ -1,0 +1,875 @@
+# New registry versions for the regere app + platform workloads (spec revision 1).
+# Import with `ikit registry import deploy/regere/registry.yaml`; existing versions stay.
+services:
+- name: authrs
+  display_name: Authrs
+  description: Multi-tenant auth service
+  category: app
+  tags:
+  - rust
+  - auth
+  versions:
+  - version: 0.1.11
+    image: docker.io/kaushik91/authrs:v0.1.11
+    release_notes: 'Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 3000
+      name: http
+    env:
+    - name: DB_NAME
+      default: authrs
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: authrs_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: REDIS_URL
+      from: template:redis://{{service:redis.host}}:{{service:redis.port}}
+    - name: REDIS_ENABLED
+      default: 'true'
+      enum: &id001
+      - 'true'
+      - 'false'
+    - name: RUST_LOG
+      default: authrs=debug
+    - name: KV_STORE_ENCRYPTION_KEY
+      secret: true
+      generate: base64-32
+      description: 32 bytes, base64. Set once; changing it makes stored values unreadable
+    - name: SMTP_HOST
+      default: smtp.zeptomail.in
+    - name: SMTP_PORT
+      default: '587'
+    - name: SMTP_SECURE
+      default: 'false'
+      enum: *id001
+      description: true for port 465
+    - name: SMTP_USER
+      default: emailapikey
+    - name: SMTP_PASS
+      required: true
+      secret: true
+    - name: SMTP_FROM
+      default: noreply@regere.ai
+    - name: FRONTEND_URL
+      required: true
+      description: Public URL of the UI, e.g. https://<host>/ui/app1
+    - name: DEFAULT_SESSION_TTL_SECS
+      default: '288000'
+    - name: BUILDER_TENANT_ID
+      default: builder
+    - name: ALLOWED_ROLES
+      default: builder_developer_admin,builder_implementor_admin,developer,implementor,architect
+    - name: SEED_ADMIN_EMAIL
+      default: tech@regere.ai
+      description: Admin the seed-app script creates in each tenant
+    - name: SEED_ADMIN_PASSWORD
+      secret: true
+      generate: password
+      description: Read by the seed-app script; authrs itself ignores it
+    depends_on:
+    - postgres@latest
+    - redis@latest
+- name: core
+  display_name: Core
+  description: Core API on the service-kit image
+  category: app
+  tags:
+  - rust
+  - api
+  - service-kit
+  versions:
+  - version: 0.0.0+spec.1
+    image: docker.io/kaushik91/service-kit:latest
+    release_notes: 'Floating tag `latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 5000
+      name: http
+    needs:
+    - name: assets
+      kind: bucket
+      api: s3
+    env:
+    - name: AUTHRS_URL
+      from: service:authrs.internal_url
+    - name: SERVICE_NAME
+      default: core
+    - name: DB_NAME
+      default: core
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: core_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: REDIS_URL
+      from: template:redis://{{service:redis.host}}:{{service:redis.port}}
+    - name: REDIS_ENABLED
+      default: 'true'
+      enum: *id001
+    - name: RUST_LOG
+      default: service_kit=debug,architect_sdk=debug
+      description: Tracing target is service_kit (underscore)
+    - name: PORT
+      default: '5000'
+    - name: STORAGE_PROVIDER
+      default: s3
+    - name: STORAGE_BUCKET
+      from: resource:assets.name
+    - name: AWS_REGION
+      from: resource:assets.region
+    - name: AWS_ACCESS_KEY_ID
+      secret: true
+      from: resource:assets.access_key_id
+    - name: AWS_SECRET_ACCESS_KEY
+      secret: true
+      from: resource:assets.secret_access_key
+    - name: AWS_ENDPOINT_URL_S3
+      from: resource:assets.endpoint
+      description: Unset on AWS; set for an S3-compatible backend
+    - name: DECISION_HUB_URL
+      from: service:decision-hub.internal_url
+      description: decision-hub of the linked platform workload
+    - name: DECISION_HUB_LOG_CURL
+      default: '1'
+    - name: DECISION_HUB_TIMEOUT_SECS
+      default: '150'
+      description: Seconds core waits on decision-hub /evaluate; keep >= the longest rule timeout_secs (the SDK default of 5 drops long workflow runs)
+    - name: ARCHITECT_BULK_LIMIT
+      default: '200'
+    - name: ARCHITECT_PLATFORM_TENANT
+      default: builder
+    - name: WORKFLOW_ENGINE_URL
+      from: service:workflow-engine.internal_url
+    - name: WORKFLOW_ENGINE_TIMEOUT_MS
+      default: '120000'
+    - name: JOBQ_LEASE_SECONDS
+      default: '180'
+      description: Must be >= WORKFLOW_ENGINE_TIMEOUT_MS/1000
+    - name: DB_MAX_CONNECTIONS
+      default: '20'
+    depends_on:
+    - postgres@latest
+    - redis@latest
+    - authrs@latest
+    - workflow-engine@latest
+- name: launchpad
+  display_name: Launchpad
+  category: app
+  tags:
+  - rust
+  - api
+  versions:
+  - version: 0.0.0+spec.1
+    image: docker.io/kaushik91/launchpad:latest
+    release_notes: 'Floating tag `latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 3000
+      name: http
+    env:
+    - name: DB_NAME
+      default: launchpad
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: launchpad_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: RUST_LOG
+      default: launchpad=debug
+    - name: AUTHRS_URL
+      from: service:authrs.internal_url
+    - name: LICENSE_CHECK_MODE
+      default: disabled
+    - name: SETUP_PACKAGE_API_URL
+      default: https://accounts-api.regere.ai/api/setup-package
+    - name: PUBLIC_URL
+      description: Launchpad's public URL; the seed-app script registers it as the Launchpad service
+    depends_on:
+    - postgres@latest
+    - authrs@latest
+- name: workflow-engine
+  display_name: Workflow Engine
+  category: app
+  tags:
+  - rust
+  - workflow
+  versions:
+  - version: 0.0.0+spec.1
+    image: docker.io/kaushik91/workflow-engine:latest
+    release_notes: 'Floating tag `latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 4000
+      name: http
+    env:
+    - name: DB_NAME
+      default: workflow_engine
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: workflow_engine_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: REDIS_URL
+      from: template:redis://{{service:redis.host}}:{{service:redis.port}}
+    - name: REDIS_ENABLED
+      default: 'true'
+      enum: *id001
+    - name: RUST_LOG
+      default: workflow_engine=debug
+    - name: PORT
+      default: '4000'
+    depends_on:
+    - postgres@latest
+    - redis@latest
+- name: client-ui-next
+  display_name: Client UI (Next.js)
+  category: app
+  tags:
+  - nextjs
+  - ui
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/client-ui-next:staging-latest
+    release_notes: 'Floating tag `staging-latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 3000
+      name: http
+    env:
+    - name: NEXT_PUBLIC_LAUNCHPAD_API_URL
+      required: true
+      description: Launchpad's public URL, as the browser sees it
+    - name: LAUNCHPAD_API_URL
+      from: template:{{service:launchpad.internal_url}}/
+    - name: TENANT
+      required: true
+    - name: NEXT_PUBLIC_LOG_LEVEL
+      default: debug
+    - name: NODE_ENV
+      default: production
+    - name: APP_BASE_PATH
+      default: /ui/app1
+    - name: NEXT_PUBLIC_COMPANY_LOGO
+    - name: NEXT_PUBLIC_EMAIL_PASSWORD_LOGIN_ENABLED
+      default: 'true'
+      enum: *id001
+    - name: NEXT_PUBLIC_USERNAME_PASSWORD_LOGIN_ENABLED
+      default: 'true'
+      enum: *id001
+    - name: NEXT_PUBLIC_MICROSOFT_LOGIN_ENABLED
+      default: 'true'
+      enum: *id001
+    - name: NEXT_PUBLIC_LOGIN_BACKGROUND_IMAGE_URL
+    - name: NEXT_PUBLIC_SIMULATION_API_BASE_URL
+      description: Public URL of launchpad's /proxy/simulation
+    - name: COMMON_SERVICES_URL
+      from: service:common-services.internal_url
+      description: common-services of the linked platform workload
+    - name: NEXT_PUBLIC_COMMON_SERVICES_BASE_URL
+      default: /proxy/common-services/common-services
+- name: common-services
+  display_name: Common Services
+  description: Shared email and file storage services
+  category: platform
+  tags:
+  - platform
+  - email
+  - storage
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/common-services:latest
+    release_notes: 'Floating tag `latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 80
+      name: http
+    shm_size: 2gb
+    needs:
+    - name: assets
+      kind: bucket
+      api: s3
+    env:
+    - name: PORT
+      default: '80'
+    - name: SERVICE_CODE
+      default: common-services
+    - name: SMTP_FROM
+      default: noreply@regere.ai
+    - name: SMTP_HOST
+      default: smtp.zeptomail.in
+    - name: SMTP_PORT
+      default: '587'
+    - name: SMTP_USER
+      default: emailapikey
+    - name: SMTP_PASS
+      required: true
+      secret: true
+    - name: STORAGE_PROVIDER
+      default: s3
+    - name: STORAGE_BUCKET
+      from: resource:assets.name
+    - name: AWS_REGION
+      from: resource:assets.region
+    - name: AWS_ACCESS_KEY_ID
+      secret: true
+      from: resource:assets.access_key_id
+    - name: AWS_SECRET_ACCESS_KEY
+      secret: true
+      from: resource:assets.secret_access_key
+    - name: AWS_ENDPOINT_URL_S3
+      from: resource:assets.endpoint
+      description: Unset on AWS; set for an S3-compatible backend
+    - name: STORAGE_ACCESS_KEY
+      secret: true
+      from: resource:assets.access_key_id
+    - name: STORAGE_SECRET_KEY
+      secret: true
+      from: resource:assets.secret_access_key
+    - name: MAX_FILE_SIZE_LIMIT
+      default: '10485760'
+    - name: ALLOW_SELF_SIGNED
+      default: 'true'
+      enum: *id001
+    - name: BASE_URL
+      from: service:common-services.internal_url
+- name: decision-hub
+  display_name: Decision Hub
+  description: Rules and triggers engine
+  category: platform
+  tags:
+  - rust
+  - platform
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/decision-hub:latest
+    release_notes: 'Floating tag `latest`, the CI-built image. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 8080
+      name: http
+    - container: 9090
+      name: admin
+    env:
+    - name: DH_MODE
+      default: all
+    - name: DB_NAME
+      default: decision_hub
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: decision_hub_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DH_DATABASE__URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: DH_QUEUE__RABBITMQ__URL
+      secret: true
+      from: template:amqp://{{service:rabbitmq.env.RABBITMQ_DEFAULT_USER}}:{{service:rabbitmq.env.RABBITMQ_DEFAULT_PASS}}@{{service:rabbitmq.host}}:{{service:rabbitmq.port}}/%2F
+    - name: RUST_LOG
+      default: decision_hub=debug,dh_triggers=debug,dh_evaluator=debug,dh_actions=debug,dh_worker=debug,dh_store=info
+    depends_on:
+    - postgres@latest
+    - rabbitmq@latest
+- name: load-optimizer
+  display_name: Load Optimizer
+  description: Load and fleet packing optimizer
+  category: platform
+  tags:
+  - rust
+  - platform
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/load-optimizer:latest
+    release_notes: 'Floating tag `latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 3050
+      name: http
+    resources:
+      memory: 4g
+    needs:
+    - name: assets
+      kind: bucket
+      api: s3
+    env:
+    - name: SERVER_HOST
+      default: 0.0.0.0
+    - name: SERVER_PORT
+      default: '3050'
+    - name: RUST_LOG
+      default: warn
+    - name: DB_NAME
+      default: load_optimizer
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: load_optimizer_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: BUFFER_DEFAULT_X
+      default: '0.0'
+    - name: BUFFER_DEFAULT_Y
+      default: '0.0'
+    - name: BUFFER_DEFAULT_Z
+      default: '0.0'
+    - name: CG_MIN
+      default: '0.40'
+    - name: CG_MAX
+      default: '0.60'
+    - name: CG_SWAP_MAX_ITER
+      default: '20'
+    - name: FLEET_CAP
+      default: '1000'
+    - name: FLEET_PACKING_TOP_N
+      default: '200'
+    - name: PRE_SCORE_PENALTY
+      default: '1000000.0'
+    - name: S3_BUCKET
+      from: resource:assets.name
+    - name: S3_REGION
+      from: resource:assets.region
+    - name: AWS_ACCESS_KEY_ID
+      secret: true
+      from: resource:assets.access_key_id
+    - name: AWS_SECRET_ACCESS_KEY
+      secret: true
+      from: resource:assets.secret_access_key
+    - name: AWS_ENDPOINT_URL_S3
+      from: resource:assets.endpoint
+      description: Unset on AWS; set for an S3-compatible backend
+    - name: S3_TENANT
+      default: siemens
+    - name: S3_PRESIGN_EXPIRY_SECS
+      default: '3600'
+    - name: ASSET_UPLOAD_MAX_BYTES
+      default: '5242880'
+    depends_on:
+    - postgres@latest
+- name: message-flow
+  display_name: Message Flow
+  description: Notifications over email, web push and realtime
+  category: platform
+  tags:
+  - rust
+  - platform
+  - notifications
+  versions:
+  - version: 1.0.2+spec.1
+    image: ghcr.io/regere-ai/message-flow:1.0.2
+    release_notes: 'Image 1.0.2. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 8080
+      name: http
+    - container: 9090
+      name: admin
+    needs:
+    - name: assets
+      kind: bucket
+      api: s3
+    env:
+    - name: MF_MODE
+      default: all
+    - name: DB_NAME
+      default: message_flow
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: message_flow_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: MF_DATABASE__URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: MF_QUEUE__BACKEND
+      default: none
+      description: none = DB polling only; rabbitmq uses MF_QUEUE__RABBITMQ__URL
+    - name: MF_QUEUE__RABBITMQ__URL
+      secret: true
+      from: template:amqp://{{service:rabbitmq.env.RABBITMQ_DEFAULT_USER}}:{{service:rabbitmq.env.RABBITMQ_DEFAULT_PASS}}@{{service:rabbitmq.host}}:{{service:rabbitmq.port}}/%2F
+    - name: MF_STORAGE__PROVIDER
+      default: s3
+    - name: MF_STORAGE__BUCKET
+      from: resource:assets.name
+    - name: MF_STORAGE__REGION
+      from: resource:assets.region
+    - name: MF_STORAGE__ACCESS_KEY_ID
+      secret: true
+      from: resource:assets.access_key_id
+    - name: MF_STORAGE__SECRET_ACCESS_KEY
+      secret: true
+      from: resource:assets.secret_access_key
+    - name: AWS_ENDPOINT_URL_S3
+      from: resource:assets.endpoint
+      description: Unset on AWS; set for an S3-compatible backend
+    - name: MF_CHANNELS__EMAIL__ENABLED
+      default: 'true'
+      enum: *id001
+    - name: MF_CHANNELS__EMAIL__HOST
+      default: smtp.zeptomail.in
+    - name: MF_CHANNELS__EMAIL__PORT
+      default: '587'
+    - name: MF_CHANNELS__EMAIL__USERNAME
+      default: emailapikey
+    - name: MF_CHANNELS__EMAIL__PASSWORD
+      required: true
+      secret: true
+    - name: MF_CHANNELS__EMAIL__FROM_ADDRESS
+      default: noreply@regere.ai
+    - name: MF_CHANNELS__EMAIL__FROM_NAME
+      default: Message Flow
+    - name: MF_CHANNELS__EMAIL__TLS
+      default: starttls
+    - name: RUST_LOG
+      default: message_flow=debug
+    - name: MF_GATEWAY__SUBSCRIBER_HEADER
+      default: x-user-id
+    - name: MF_REALTIME__ENABLED
+      default: 'true'
+      enum: *id001
+    - name: MF_REALTIME__API_URL
+      from: service:sockudo.internal_url
+    - name: MF_REALTIME__PUBLIC_PATH
+      default: rt
+    - name: MF_REALTIME__APP_ID
+      from: service:sockudo.env.SOCKUDO_DEFAULT_APP_ID
+    - name: MF_REALTIME__KEY
+      secret: true
+      from: service:sockudo.env.SOCKUDO_DEFAULT_APP_KEY
+    - name: MF_REALTIME__SECRET
+      secret: true
+      from: service:sockudo.env.SOCKUDO_DEFAULT_APP_SECRET
+    - name: MF_CHANNELS__PUSH__VAPID_PRIVATE_KEY
+      required: true
+      secret: true
+      description: Generate once with `message-flow gen-vapid`
+    - name: MF_CHANNELS__PUSH__VAPID_PUBLIC_KEY
+      required: true
+    - name: MF_CHANNELS__PUSH__VAPID_SUBJECT
+      default: mailto:noreply@regere.ai
+    depends_on:
+    - postgres@latest
+    - sockudo@latest
+- name: platform-gw
+  display_name: Platform Gateway
+  description: API gateway and AI gateway in front of the platform services
+  category: platform
+  tags:
+  - rust
+  - gateway
+  - ai
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/platform-gw:latest
+    release_notes: 'Floating tag `latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    ports:
+    - container: 8080
+      name: proxy
+    - container: 8081
+      name: ai
+    - container: 9090
+      name: admin
+    env:
+    - name: GW_MODE
+      default: all
+      enum:
+      - proxy
+      - ai
+      - admin
+      - all
+    - name: GW_ENV
+      default: production
+    - name: DB_NAME
+      default: platform_gw
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: platform_gw_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: GW_DATABASE__URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    - name: GW_SECURITY__ENCRYPTION_KEY
+      secret: true
+      generate: base64-32
+      description: Set once; changing it invalidates enrolled authenticators
+    - name: GW_SECURITY__KEY_PEPPER
+      secret: true
+      generate: base64-32
+      description: Set once; changing it invalidates every API key
+    - name: GW_ADMIN_EMAIL
+      default: tech@regere.ai
+      description: Bootstrap admin, read only while admin_users is empty
+    - name: GW_ADMIN_PASSWORD
+      secret: true
+      generate: password
+    - name: GW_AI__DEFAULT_MAX_TOKENS
+      default: '4096'
+    - name: RUST_LOG
+      default: info
+    depends_on:
+    - postgres@latest
+- name: sockudo
+  display_name: Sockudo
+  description: Pusher-compatible realtime WebSocket server
+  category: platform
+  tags:
+  - rust
+  - realtime
+  - websocket
+  versions:
+  - version: 0.0.0+spec.1
+    image: godson326/sockudo:latest
+    release_notes: 'Floating tag `latest`. Configured by env (the image reads /app/config/config.json, not a mounted config.toml). Spec revision 1: databases, URLs and keys come from templates, links, resources
+      and generated secrets instead of pasted values.'
+    ports:
+    - container: 6002
+      name: http
+    env:
+    - name: RUST_LOG
+      default: info
+    - name: PORT
+      default: '6002'
+    - name: SOCKUDO_DEFAULT_APP_ID
+      default: notifications
+    - name: SOCKUDO_DEFAULT_APP_KEY
+      secret: true
+      generate: password
+      description: message-flow reads it from here
+    - name: SOCKUDO_DEFAULT_APP_SECRET
+      secret: true
+      generate: password
+      description: message-flow reads it from here
+    - name: SOCKUDO_DEFAULT_APP_ENABLE_CLIENT_MESSAGES
+      default: 'false'
+      enum: *id001
+      description: Backend-only publishing
+    - name: SOCKUDO_DEFAULT_APP_ALLOWED_ORIGINS
+      description: Origins browsers may connect from; set it to the UI's origin (unset allows any)
+    - name: SOCKUDO_DEFAULT_APP_MAX_CONNECTIONS
+      default: '20000'
+    - name: SOCKUDO_DEFAULT_APP_MAX_CLIENT_EVENTS_PER_SECOND
+      default: '100'
+    healthcheck:
+      command:
+      - curl
+      - -f
+      - http://127.0.0.1:6002/up
+      interval: 15s
+      timeout: 5s
+      retries: 5
+- name: simulation-service
+  display_name: Simulation Service
+  description: Simulation API; queues jobs on SQS for the simulation workers
+  category: platform
+  tags:
+  - python
+  - platform
+  - simulation
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/simulation-service-v2:latest
+    release_notes: 'Floating tag `latest`. Owns the bucket and queue its workers share. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted
+      values.'
+    ports:
+    - container: 8005
+      name: http
+    needs:
+    - name: assets
+      kind: bucket
+      api: s3
+    - name: jobs
+      kind: queue
+      api: sqs
+      options:
+        visibility_timeout: 300
+        dead_letter:
+          max_receive: 10
+    env:
+    - &id002
+      name: PORT
+      default: '8005'
+    - &id003
+      name: STORAGE_PROVIDER
+      default: s3
+    - &id004
+      name: STORAGE_BUCKET
+      from: resource:assets.name
+    - &id005
+      name: SQS_QUEUE_URL
+      from: resource:jobs.url
+    - &id006
+      name: AWS_REGION
+      from: resource:jobs.region
+    - &id007
+      name: AWS_ACCESS_KEY_ID
+      secret: true
+      from: resource:jobs.access_key_id
+    - &id008
+      name: AWS_SECRET_ACCESS_KEY
+      secret: true
+      from: resource:jobs.secret_access_key
+    - name: AWS_ENDPOINT_URL_S3
+      from: resource:assets.endpoint
+      description: Unset on AWS; set for an S3-compatible backend
+    - &id009
+      name: AWS_ENDPOINT_URL_SQS
+      from: resource:jobs.endpoint
+      description: Unset on AWS; set for an SQS-compatible backend
+    - &id010
+      name: S3_PRESIGNED_URL_EXPIRES_IN
+      default: '3600'
+    - &id011
+      name: SQS_WAIT_TIME_SECONDS
+      default: '10'
+    - &id012
+      name: SQS_VISIBILITY_TIMEOUT_SECONDS
+      default: '300'
+    - &id013
+      name: WORKER_IDLE_SLEEP_SECONDS
+      default: '1'
+    - &id014
+      name: WORKER_DELETE_FAILED_MESSAGE
+      default: 'false'
+      enum: *id001
+    - name: DB_NAME
+      default: simulation
+      description: Database in the workload's postgres; create-service-dbs creates it
+    - name: DB_USER
+      default: simulation_app
+    - name: DB_PASSWORD
+      secret: true
+      generate: password
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_NAME}}
+    depends_on:
+    - postgres@latest
+- name: simulation-worker
+  display_name: Simulation Worker
+  description: SQS worker for simulation-service; needs the same env as simulation-service
+  category: platform
+  tags:
+  - python
+  - platform
+  - simulation
+  - worker
+  versions:
+  - version: 0.0.0+spec.1
+    image: ghcr.io/regere-ai/simulation-service-v2-worker-1:latest
+    release_notes: 'Floating tag `latest`. Three replicas on simulation-service''s queue and database. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets
+      instead of pasted values.'
+    command:
+    - python
+    - /app/worker.py
+    replicas: 3
+    needs:
+    - name: assets
+      use: simulation-service.assets
+    - name: jobs
+      use: simulation-service.jobs
+    env:
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+    - name: AWS_ENDPOINT_URL_S3
+      from: resource:assets.endpoint
+      description: Unset on AWS; set for an S3-compatible backend
+    - *id009
+    - *id010
+    - *id011
+    - *id012
+    - *id013
+    - *id014
+    - name: DATABASE_URL
+      secret: true
+      from: template:postgresql://{{service:simulation-service.env.DB_USER}}:{{service:simulation-service.env.DB_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{service:simulation-service.env.DB_NAME}}
+    depends_on:
+    - postgres@latest
+    - simulation-service@latest
+- name: postgres
+  display_name: PostgreSQL
+  description: Relational database
+  category: data
+  tags:
+  - sql
+  - database
+  homepage: https://www.postgresql.org
+  versions:
+  - version: 18.4.0+spec.1
+    image: postgres:18.4-alpine
+    release_notes: The superuser password is generated.
+    ports:
+    - container: 5432
+      name: postgres
+    env:
+    - name: POSTGRES_USER
+      default: postgres
+    - name: POSTGRES_PASSWORD
+      secret: true
+      generate: password
+      description: Superuser password
+    - name: POSTGRES_DB
+      default: postgres
+    volumes:
+    - name: data
+      path: /var/lib/postgresql
+    healthcheck:
+      command:
+      - pg_isready
+      - -U
+      - postgres
+      interval: 5s
+      timeout: 5s
+      retries: 5
+- name: rabbitmq
+  display_name: RabbitMQ
+  description: Message broker with the management UI
+  category: data
+  tags:
+  - queue
+  - amqp
+  homepage: https://www.rabbitmq.com
+  versions:
+  - version: 3.12.9+spec.1
+    image: rabbitmq:3.12.9-management
+    release_notes: The default user's password is generated.
+    ports:
+    - container: 5672
+      name: amqp
+    - container: 15672
+      name: management
+    env:
+    - name: RABBITMQ_DEFAULT_USER
+      default: guest
+    - name: RABBITMQ_DEFAULT_PASS
+      secret: true
+      generate: password
+    volumes:
+    - name: data
+      path: /var/lib/rabbitmq
+    healthcheck:
+      command:
+      - rabbitmq-diagnostics
+      - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
