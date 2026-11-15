@@ -324,16 +324,26 @@ impl App {
             )));
         }
 
-        // Secrets the new version generates and the service does not have yet.
-        let key = self.service_secret_key(workload, name);
-        let mut secrets: BTreeMap<String, String> = match self.secrets.get(&key)? {
-            Some(json) => serde_json::from_str(&json).map_err(|e| {
-                AppError::Invalid(format!("keychain entry {key} is not valid JSON: {e}"))
-            })?,
-            None => BTreeMap::new(),
-        };
+        // Secrets the new version generates and the service does not have yet. The keychain
+        // is only opened when there is one, so upgrades of other services never need it.
         let mut secret_env = service.secret_env.clone();
-        if !fill_generated(&version.spec, &mut secrets).is_empty() {
+        let generates_new = version
+            .spec
+            .env
+            .iter()
+            .any(|v| v.generate.is_some() && !service.secret_env.contains(&v.name));
+        let key = self.service_secret_key(workload, name);
+        let mut secrets: BTreeMap<String, String> = if generates_new {
+            match self.secrets.get(&key)? {
+                Some(json) => serde_json::from_str(&json).map_err(|e| {
+                    AppError::Invalid(format!("keychain entry {key} is not valid JSON: {e}"))
+                })?,
+                None => BTreeMap::new(),
+            }
+        } else {
+            BTreeMap::new()
+        };
+        if generates_new && !fill_generated(&version.spec, &mut secrets).is_empty() {
             self.secrets.set(
                 &key,
                 &serde_json::to_string(&secrets).expect("string map serializes"),
