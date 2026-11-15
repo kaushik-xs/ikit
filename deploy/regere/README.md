@@ -19,16 +19,18 @@ Everything derives from the workload name, which ikit makes unique in the org
 
 | Thing | Name | Example (platform `wl-regere-dev-002`) |
 |---|---|---|
-| Compose project, containers | `<wl>`, `<wl>-<svc>-<n>` | `wl-regere-dev-002-decision-hub-1` |
+| Compose project, containers | `<wl>`, `<wl>-<svc>-<n>` | `wl-regere-dev-002-common-services-1` |
 | Group networks, volumes | `<wl>_<group>`, `<wl>_<svc>_<vol>` | `wl-regere-dev-002_platform` |
 | Network the platform offers | `<wl>-link` | `wl-regere-dev-002-link` |
-| How the app reaches a platform service | `<wl>-<svc>` | `http://wl-regere-dev-002-decision-hub:8080` |
+| How the app reaches a platform service | `<wl>-<svc>` | `http://wl-regere-dev-002-common-services:80` |
 | Buckets, queues | `<wl>-<svc>-<need>[-suffix]` | `wl-regere-dev-002-simulation-service-jobs` |
-| Databases, roles | `DB_NAME`, `DB_USER` per service, in the workload's own postgres | `decision_hub`, `decision_hub_app` |
+| Databases, roles | `DB_NAME`, `DB_USER` per service, in the workload's own postgres | `load_optimizer`, `load_optimizer_app` |
 
 No service name or URL is written down anywhere: `core`'s `DECISION_HUB_URL` is
-`service:decision-hub.internal_url`, which resolves to whichever platform workload the app
-links to. A new env is `env-up.sh --env qa --target <target>`.
+`service:decision-hub.internal_url`, and the UI's `COMMON_SERVICES_URL` is
+`service:common-services.internal_url`: each resolves in the workload first, then in the
+platform workload it links to. decision-hub runs in the app workload (with RabbitMQ, its
+only user), so core reaches it as `http://decision-hub:8080`. A new env is `env-up.sh --env qa --target <target>`.
 
 ## What changed against yotta
 
@@ -44,6 +46,7 @@ links to. A new env is `env-up.sh --env qa --target <target>`.
 | `CORE_DECISION_HUB_TIMEOUT_SECS=150` | core default `DECISION_HUB_TIMEOUT_SECS=150` |
 | authrs v0.1.11 with `KV_STORE_ENCRYPTION_KEY` | `authrs@0.1.11`, key generated (32 bytes, base64) |
 | decision-hub `kaushik91/decision-hub` running, compose file asking for ghcr | `ghcr.io/regere-ai/decision-hub:latest` |
+| decision-hub and RabbitMQ in the platform stack | both in the app workload, next to core and workflow-engine; the platform runs no broker |
 | common-services `shm_size: 2gb`, `extra_hosts` host-gateway | `shm_size` in the spec; route hosts mapped to the host automatically |
 | Caddy: `/ui/app1*` unstripped, `/rt/app/*` stripped, `/` redirected | `route add --keep-prefix`, a stripped `/rt` route, a `redir` snippet (`env-up.sh --public-url`) |
 | redis on `0.0.0.0:6378`, postgres on the ZeroTier IP | nothing published except what browsers need (or what you publish on purpose) |
@@ -79,22 +82,27 @@ eval "$(docker run --rm ghcr.io/regere-ai/message-flow:1.0.2 gen-vapid | sed 's/
 SMTP_PASS=not-real deploy/regere/env-up.sh --env dev --target laptop --app wl-regere-dev-001 --platform wl-regere-dev-002 --reset
 ```
 
-What the mock run on the laptop showed (14 November 2026):
+What the mock run on the laptop showed (15 November 2026, decision-hub in the app workload):
 
-- Platform: 14 containers, simulation-worker at 3 replicas; buckets and the
-  `wl-regere-dev-002-simulation-service-jobs` queue (with its DLQ) created by apply; the
-  five platform databases and roles created post-data, before any service started.
-- App: core reaches `wl-regere-dev-002-decision-hub:8080` (200) and cannot reach the
-  platform's postgres; launchpad's service rows point at `wl-regere-dev-002-*`; tenants
-  `builder` and `siemens_energy` seeded; the seeded admin logs in through authrs; the UI
-  answers on `/ui/app1`.
+- Platform: 12 containers, simulation-worker at 3 replicas, no broker; buckets and the
+  `wl-regere-dev-002-simulation-service-jobs` queue (with its DLQ) created by apply; its four
+  databases (`load_optimizer`, `message_flow`, `platform_gw`, `simulation`) and roles created
+  post-data, before any service started.
+- App: 9 containers including decision-hub and rabbitmq; `decision_hub` created post-data in
+  the app's postgres; core reaches `http://decision-hub:8080` (200) and the platform's
+  common-services, but not the platform's postgres; launchpad's rows point at the local
+  decision-hub and at `wl-regere-dev-002-*` for platform services; tenants `builder` and
+  `siemens_energy` seeded; the seeded admin logs in through authrs; the UI answers on
+  `/ui/app1`.
 
 Found on the way, outside ikit:
 
 - **decision-hub never starts its RabbitMQ backend**, here and on yotta since 4 November:
   `config/default.toml` declares exchange `decision-hub` as `topic` (rule-events) and again
-  as `fanout` (rule-invalidations), and RabbitMQ refuses the second. Give rule-invalidations
-  its own exchange in decision-hub.
+  as `fanout` (rule-invalidations), and RabbitMQ refuses the second. Fixed in
+  [Regere-AI/decision-hub#5](https://github.com/Regere-AI/decision-hub/pull/5)
+  (rule-invalidations gets `decision-hub.invalidations`); the ghcr image has it once that
+  merges and builds.
 - **After a host reboot**, Docker restarts every container at once, without compose's start
   order; decision-hub then fails to reach a broker that is still starting and does not retry.
   Same on yotta. decision-hub should retry the connection.
@@ -109,6 +117,9 @@ The calls, as decided for the actual deployment:
   would lose them. Dump each database on yotta, restore into the new workload's database with
   `--no-owner` (create-service-dbs has already made the database and role), then run the seed
   hook again: launchpad's upsert repoints every service row to the new hostnames.
+  `platform_decision_hub` moves from yotta's platform postgres into the **app** workload's
+  postgres (database `decision_hub`); the other `platform_*` databases go to the platform
+  workload, the `siemens_energy_*` ones to the app workload.
 - **Buckets: adopt the existing ones for this env only.** Before the first apply,
   `ikit res adopt <svc>.assets <bucket>` for core (`new-dev-assets-d1g3h62dzl6i`),
   common-services, message-flow, load-optimizer and simulation (`new-app-dev-*`), and the
@@ -130,6 +141,7 @@ Order:
 3. Adopt the buckets and queue, set the carried-over keys (above).
 4. `ikit apply` the platform, then the app (data comes up, databases are created, services start).
 5. Stop writes on yotta (`docker compose stop` in both folders), dump the nine databases,
-   restore them into the new postgres containers, `ikit hook run seed --wl <app>`.
+   restore them into the new postgres containers (decision_hub into the app's, above),
+   `ikit hook run seed --wl <app>`.
 6. Point `launchpad-headless-dev.regere.ai` at the new server; `ikit apply` the app again so
    Caddy gets the certificate.

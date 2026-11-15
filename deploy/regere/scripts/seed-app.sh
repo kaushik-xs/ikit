@@ -27,7 +27,7 @@
 #
 # A post-apply hook on the app workload, which must be linked to its platform workload
 # (`ikit wl link`): the platform URLs resolve to that workload's services, e.g.
-# http://wl-regere-dev-002-decision-hub:8080.
+# http://wl-regere-dev-002-common-services:80. decision-hub runs in the app workload itself.
 #   ikit hook add seed --script seed-app --phase post-apply --param TENANT_NAME="Siemens Energy"
 #
 # Every seed upserts, so re-running it is safe. Launchpad's upsert also rewrites each

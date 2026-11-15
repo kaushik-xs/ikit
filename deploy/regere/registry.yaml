@@ -347,14 +347,15 @@ services:
 - name: decision-hub
   display_name: Decision Hub
   description: Rules and triggers engine
-  category: platform
+  category: app
   tags:
   - rust
   - platform
   versions:
   - version: 0.0.0+spec.1
     image: ghcr.io/regere-ai/decision-hub:latest
-    release_notes: 'Floating tag `latest`, the CI-built image. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    release_notes: 'Floating tag `latest`, the CI-built image. Runs in the app workload, next to core and workflow-engine. Spec revision 1: databases, URLs and keys come from templates, links, resources
+      and generated secrets instead of pasted values.'
     ports:
     - container: 8080
       name: http
@@ -499,7 +500,7 @@ services:
       description: none = DB polling only; rabbitmq uses MF_QUEUE__RABBITMQ__URL
     - name: MF_QUEUE__RABBITMQ__URL
       secret: true
-      from: template:amqp://{{service:rabbitmq.env.RABBITMQ_DEFAULT_USER}}:{{service:rabbitmq.env.RABBITMQ_DEFAULT_PASS}}@{{service:rabbitmq.host}}:{{service:rabbitmq.port}}/%2F
+      description: Only read with MF_QUEUE__BACKEND=rabbitmq; the platform workload runs no broker
     - name: MF_STORAGE__PROVIDER
       default: s3
     - name: MF_STORAGE__BUCKET

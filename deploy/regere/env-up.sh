@@ -71,16 +71,17 @@ echo "platform: $PF   app: $APP" >&2
 export IKIT_SECRET_COMMON_SERVICES_SMTP_PASS=$SMTP_PASS
 export IKIT_SECRET_MESSAGE_FLOW_MF_CHANNELS__EMAIL__PASSWORD=$SMTP_PASS
 export IKIT_SECRET_MESSAGE_FLOW_MF_CHANNELS__PUSH__VAPID_PRIVATE_KEY=$VAPID_PRIVATE_KEY
-ik sg add data --wl "$PF" --services postgres,redis,rabbitmq
+ik sg add data --wl "$PF" --services postgres,redis
 ik sg add platform --wl "$PF" \
-  --services common-services,decision-hub,load-optimizer,message-flow,platform-gw,sockudo,yard-recom,simulation-service,simulation-worker \
+  --services common-services,load-optimizer,message-flow,platform-gw,sockudo,yard-recom,simulation-service,simulation-worker \
   --set "message-flow.MF_CHANNELS__PUSH__VAPID_PUBLIC_KEY=$VAPID_PUBLIC_KEY"
 ik hook add service-dbs --wl "$PF" --script create-service-dbs --phase post-data
 
-# 4. App workload, linked to the platform: core reaches decision-hub, the UI common-services.
+# 4. App workload, linked to the platform so the UI reaches common-services. decision-hub
+#    runs here, next to core and workflow-engine, with the only RabbitMQ it uses.
 export IKIT_SECRET_AUTHRS_SMTP_PASS=$SMTP_PASS
-ik sg add data --wl "$APP" --services postgres,redis
-ik sg add app --wl "$APP" --services authrs,core,launchpad,workflow-engine,client-ui-next \
+ik sg add data --wl "$APP" --services postgres,redis,rabbitmq
+ik sg add app --wl "$APP" --services authrs,core,launchpad,workflow-engine,decision-hub,client-ui-next \
   --set "client-ui-next.TENANT=$TENANT" \
   --set "client-ui-next.NEXT_PUBLIC_COMPANY_LOGO=$COMPANY_LOGO" \
   --set "authrs.FRONTEND_URL=http://pending/ui/app1" \
