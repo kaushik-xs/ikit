@@ -1,0 +1,81 @@
+name: Publish to crates.io
+
+# Pushing a tag like v0.1.1 publishes every workspace crate to crates.io, in dependency order.
+# Run it by hand (Actions > Publish to crates.io > Run workflow) for a dry run, or to resume
+# after a partial publish: crate versions already on crates.io are skipped.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package and verify only, do not upload"
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: "true"
+  # Dependencies come before the crates that use them.
+  CRATES: >-
+    ikit-core ikit-net ikit-provider ikit-state ikit-app ikit-mcp ikit-cli
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # keyring's Secret Service backend links against libdbus on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Check the tag matches the workspace version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ikit-cli") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $version" >&2
+            exit 1
+          fi
+
+      # The sqlx query data lives at the workspace root; a published crate is built on its own,
+      # so ikit-state has to carry a copy.
+      - name: Bundle sqlx offline data into ikit-state
+        run: cp -r .sqlx crates/ikit-state/.sqlx
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          meta=$(cargo metadata --no-deps --format-version 1)
+          for crate in $CRATES; do
+            version=$(jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version' <<<"$meta")
+            status=$(curl -s -o /dev/null -w '%{http_code}' \
+              -A "ikit-publish-workflow (github.com/$GITHUB_REPOSITORY)" \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            if [ "$status" = "200" ]; then
+              echo "::notice::$crate $version is already on crates.io, skipping"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              # Crates whose workspace deps are not on crates.io yet cannot be verified alone.
+              echo "::group::package $crate $version (dry run)"
+              cargo package -p "$crate" --allow-dirty --locked --no-verify
+              echo "::endgroup::"
+            else
+              echo "::group::publish $crate $version"
+              cargo publish -p "$crate" --allow-dirty --locked
+              echo "::endgroup::"
+            fi
+          done
