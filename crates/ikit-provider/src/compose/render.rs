@@ -492,8 +492,10 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
         {
             return Err(RenderError::ReplicasPublished(inst.name.clone(), n));
         }
-        let deploy = (replicas.is_some() || resources.is_some())
-            .then_some(Deploy { replicas, resources });
+        let deploy = (replicas.is_some() || resources.is_some()).then_some(Deploy {
+            replicas,
+            resources,
+        });
 
         let mut service_networks: BTreeMap<String, ServiceNetwork> = reachable_groups(inst.group)
             .iter()

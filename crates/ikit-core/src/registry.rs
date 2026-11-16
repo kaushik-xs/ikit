@@ -548,9 +548,15 @@ mod tests {
         let def = VersionDef::new(Version::new(0, 0, 0), "img".into(), spec.clone());
         assert_eq!(def.spec(), spec);
 
-        let zero = ServiceSpec { replicas: Some(0), ..Default::default() };
+        let zero = ServiceSpec {
+            replicas: Some(0),
+            ..Default::default()
+        };
         assert!(zero.validate().is_err());
-        let blank = ServiceSpec { command: vec![" ".into()], ..Default::default() };
+        let blank = ServiceSpec {
+            command: vec![" ".into()],
+            ..Default::default()
+        };
         assert!(blank.validate().is_err());
     }
 
