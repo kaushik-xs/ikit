@@ -13,8 +13,8 @@ use ikit_core::{
 };
 use ikit_net::Member;
 use ikit_provider::compose::{
-    self, COMPOSE_FILE, Plan, Rendered, SECRETS_FILE, ServiceInput, WorkloadInput, ZT_SIDECAR,
-    ZtSidecar,
+    self, COMPOSE_FILE, LinkedWorkload, Plan, Rendered, SECRETS_FILE, ServiceInput, WorkloadInput,
+    ZT_SIDECAR, ZtSidecar,
 };
 use ikit_state::NewRun;
 use serde::{Deserialize, Serialize};
@@ -376,7 +376,59 @@ impl App {
     /// The workload's compose files, with secret values read from the keychain.
     pub async fn render_workload(&self, workload: &str) -> Result<Rendered> {
         let detail = self.workload_show(workload).await?;
-        let mut route_publishes = self.route_publishes(&detail.workload).await?;
+        let services = self.service_inputs(workload, true).await?;
+        let zerotier = self.zt_sidecar_network(workload).await?.map(|n| ZtSidecar {
+            network_id: n.network_id,
+        });
+        let external_networks = self
+            .store
+            .networks()
+            .docker_networks(detail.workload.id)
+            .await?;
+        let providers = self
+            .store
+            .networks()
+            .providers_of(detail.workload.id)
+            .await?;
+        let consumers = self
+            .store
+            .networks()
+            .consumers_of(detail.workload.id)
+            .await?;
+        let mut host_aliases = self.route_hosts(workload).await?;
+        let mut linked = Vec::new();
+        for provider in providers {
+            host_aliases.extend(self.route_hosts(&provider).await?);
+            linked.push(LinkedWorkload {
+                services: self.service_inputs(&provider, false).await?,
+                workload: provider,
+            });
+        }
+        host_aliases.sort();
+        host_aliases.dedup();
+        let input = WorkloadInput {
+            org: self.org.name.clone(),
+            workload: workload.to_owned(),
+            env: detail.workload.env.clone(),
+            services,
+            zerotier,
+            external_networks,
+            linked,
+            offers_link: !consumers.is_empty(),
+            host_aliases,
+        };
+        compose::render(&input).map_err(|e| AppError::Invalid(e.to_string()))
+    }
+
+    /// Everything the renderer needs about a workload's services. `publish` adds the
+    /// loopback ports its routes need (only the workload being rendered publishes).
+    async fn service_inputs(&self, workload: &str, publish: bool) -> Result<Vec<ServiceInput>> {
+        let detail = self.workload_show(workload).await?;
+        let mut route_publishes = if publish {
+            self.route_publishes(&detail.workload).await?
+        } else {
+            BTreeMap::new()
+        };
         let mut urls = self.route_urls(workload).await?;
         let mut resources = self.resource_inputs(&detail.workload).await?;
         let mut specs = BTreeMap::new();
@@ -395,7 +447,7 @@ impl App {
                 let key = self.service_secret_key(workload, &instance.name);
                 let json = self.secrets.get(&key)?.ok_or_else(|| {
                     AppError::Invalid(format!(
-                        "keychain entry {key} is missing; set the secrets again with `ikit svc set {} --secret ...`",
+                        "keychain entry {key} is missing; set the secrets again with `ikit svc set {} --secret ... --wl {workload}`",
                         instance.name
                     ))
                 })?;
@@ -412,22 +464,7 @@ impl App {
                 secrets,
             });
         }
-        let zerotier = self.zt_sidecar_network(workload).await?.map(|n| ZtSidecar {
-            network_id: n.network_id,
-        });
-        let external_networks = self
-            .store
-            .networks()
-            .docker_networks(detail.workload.id)
-            .await?;
-        let input = WorkloadInput {
-            org: self.org.name.clone(),
-            workload: workload.to_owned(),
-            services,
-            zerotier,
-            external_networks,
-        };
-        compose::render(&input).map_err(|e| AppError::Invalid(e.to_string()))
+        Ok(services)
     }
 
     /// What `apply` would change on the target.
@@ -473,6 +510,7 @@ impl App {
         let identities = self.identity_plans(&wl).await?;
         let mut warnings = self.boundary_warnings(&wl).await?;
         warnings.extend(port_notes);
+        warnings.extend(self.link_notes(&wl).await?);
         Ok(DeployPlan {
             workload: workload.to_owned(),
             target: target.name,
@@ -630,6 +668,7 @@ impl App {
                 )
                 .await?;
             self.write_files(&place, &rendered).await?;
+            self.ensure_link_networks(wl, &place).await?;
             let logins = self.store.registry().logins().await?;
             let hosts: std::collections::BTreeSet<String> = rendered
                 .images
@@ -641,23 +680,66 @@ impl App {
                 self.docker_login(&place, &login.host, &login.username, &password)
                     .await?;
             }
-            let args = [
-                "up",
-                "--detach",
-                "--remove-orphans",
-                "--wait",
-                "--wait-timeout",
-                "600",
-            ];
-            let out = self.compose(&place, &wl.name, &args, DEPLOY).await?;
+            // Data services first when hooks must prepare them (databases, roles) before
+            // the services that use them start.
+            let services = self.store.workloads().services(wl.id).await?;
+            let data: Vec<&str> = services
+                .iter()
+                .filter(|s| s.group == ikit_core::Category::Data)
+                .map(|s| s.name.as_str())
+                .collect();
+            let has_post_data = self
+                .hook_list(&wl.name)
+                .await?
+                .iter()
+                .any(|h| h.phase == HookPhase::PostData);
+            if has_post_data && !data.is_empty() {
+                let mut args = vec!["up", "--detach", "--wait", "--wait-timeout", "600"];
+                args.extend(&data);
+                let out = self.compose(&place, &wl.name, &args, DEPLOY).await?;
+                if !out.success() {
+                    return Err(failed("docker compose up (data services)", &out));
+                }
+                let data_up = Workload {
+                    status: WorkloadStatus::Applied,
+                    ..wl.clone()
+                };
+                ran.extend(
+                    self.run_phase(
+                        &data_up,
+                        &place,
+                        HookPhase::PostData,
+                        Some(run_id),
+                        allow_changed,
+                        None,
+                    )
+                    .await?,
+                );
+            }
+            // A workload with only static or address routes has no containers; Compose
+            // refuses `up` without services, and `down` clears any it had before.
+            let no_services = self.store.workloads().services(wl.id).await?.is_empty();
+            let args: &[&str] = if no_services {
+                &["down", "--remove-orphans"]
+            } else {
+                &[
+                    "up",
+                    "--detach",
+                    "--remove-orphans",
+                    "--wait",
+                    "--wait-timeout",
+                    "600",
+                ]
+            };
+            let out = self.compose(&place, &wl.name, args, DEPLOY).await?;
             if !out.success() {
-                return Err(failed("docker compose up", &out));
+                return Err(failed(&format!("docker compose {}", args[0]), &out));
             }
             // Services run with their new keys now; the rotated-out ones can go.
             self.retire_keys(wl).await?;
             // The proxy switches over once the services are up and healthy.
             if let Some(edge) = &plan.edge {
-                self.edge_apply(&target, edge).await?;
+                self.edge_apply(&target, &wl.name, edge).await?;
             }
             // Authorized before post-apply hooks, which may reach the workload over ZeroTier.
             let zerotier = match self.zt_sidecar_network(&wl.name).await? {
@@ -1450,6 +1532,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_data_hooks_run_between_the_data_and_the_rest() {
+        let (_dir, app, docker) = setup().await;
+        let wl = "wl-acme-dev-001";
+        app.hook_add(
+            wl,
+            shell_hook("dbs", HookPhase::PostData, "echo make-dbs", Some("redis")),
+        )
+        .await
+        .unwrap();
+        let plan = app.deploy_plan(wl).await.unwrap();
+        let report = app.deploy_apply(&plan, "test", false).await.unwrap();
+        assert_eq!(report.hooks_ran.len(), 1);
+        assert!(
+            report.hooks_ran[0].warning.is_none(),
+            "{:?}",
+            report.hooks_ran
+        );
+
+        let calls = docker.calls.lock().unwrap().clone();
+        let data_up = calls
+            .iter()
+            .position(|c| c.contains("up --detach --wait --wait-timeout 600 redis"))
+            .expect("data services start first");
+        let hook = calls.iter().position(|c| c.contains("make-dbs")).unwrap();
+        let all_up = calls
+            .iter()
+            .position(|c| c.contains("up --detach --remove-orphans"))
+            .unwrap();
+        assert!(data_up < hook && hook < all_up, "{calls:#?}");
+    }
+
+    #[tokio::test]
     async fn failing_hooks_follow_their_policy() {
         let (_dir, app, _) = setup().await;
         let wl = "wl-acme-dev-001";
@@ -1899,6 +2013,26 @@ services:
             .unwrap();
             app.resource_bind_env("dev", name).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn apply_brings_back_a_created_resource_that_was_deleted() {
+        let (_dir, app, _docker, driver) = setup_sim().await;
+        let wl = "wl-acme-dev-001";
+        add_backends(&app).await;
+        let plan = app.deploy_plan(wl).await.unwrap();
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        let queue = "wl-acme-dev-001-sim-jobs";
+        assert!(driver.items.lock().unwrap().contains_key(queue));
+
+        // Someone deletes the queue (or a mock backend restarts and forgets it).
+        driver.items.lock().unwrap().remove(queue);
+        let plan = app.deploy_plan(wl).await.unwrap();
+        app.deploy_apply(&plan, "test", false).await.unwrap();
+        assert!(
+            driver.items.lock().unwrap().contains_key(queue),
+            "the next apply recreates it"
+        );
     }
 
     #[tokio::test]

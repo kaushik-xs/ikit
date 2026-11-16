@@ -255,6 +255,51 @@ impl NetworkRepo for SqliteNetworks {
             })
             .collect()
     }
+
+    async fn link_workload(&self, consumer_id: i64, provider_id: i64) -> Result<bool> {
+        let now = Utc::now();
+        let result = sqlx::query!(
+            r#"INSERT INTO workload_links (consumer_id, provider_id, created_at)
+               VALUES (?, ?, ?) ON CONFLICT DO NOTHING"#,
+            consumer_id,
+            provider_id,
+            now,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn unlink_workload(&self, consumer_id: i64, provider_id: i64) -> Result<bool> {
+        let result = sqlx::query!(
+            "DELETE FROM workload_links WHERE consumer_id = ? AND provider_id = ?",
+            consumer_id,
+            provider_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn providers_of(&self, consumer_id: i64) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT w.name FROM workload_links l JOIN workloads w ON w.id = l.provider_id
+               WHERE l.consumer_id = ? ORDER BY w.name"#,
+            consumer_id,
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    async fn consumers_of(&self, provider_id: i64) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT w.name FROM workload_links l JOIN workloads w ON w.id = l.consumer_id
+               WHERE l.provider_id = ? ORDER BY w.name"#,
+            provider_id,
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
 }
 
 #[cfg(test)]

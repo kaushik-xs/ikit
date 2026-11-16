@@ -115,6 +115,8 @@ Commands that change state take the org's lock and push a new generation when th
 | `ikit org unlock --force` | Clear the lock of a writer that crashed (after checking it is not running) |
 | `ikit org secrets list` | Who can read each secrets file |
 
+To look inside `secrets/org.age` yourself, see [Read an org's secrets by hand](read-org-secrets.md).
+
 When someone else holds the lock, a command waits up to 60 seconds (`--lock-timeout`) and then
 fails, naming the holder and their command. Long deploys renew the lock as they run. A crashed
 writer's lock lapses within 10 minutes.

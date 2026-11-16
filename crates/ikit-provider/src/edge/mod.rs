@@ -9,6 +9,8 @@
 //! /etc/ikit/edge/.lock                flock'd by every script that changes the edge
 //! /etc/ikit/edge/sites/<org>__<wl>.conf   one site file per workload, included by the
 //!                                     proxy's main config
+//! /var/lib/ikit/edge/www/<org>/<wl>/<route>/<hash>/   files of a static route, one folder
+//!                                     per upload, named by the hash of its contents
 //! ```
 //!
 //! Each site file starts with `# ikit ...` header lines naming its org, workload, routes
@@ -20,18 +22,20 @@ mod host;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ikit_core::{EdgeConfig, EdgeKind, Redirect, Route, TlsMode};
+use ikit_core::{EdgeConfig, EdgeKind, Redirect, Route, RouteBackend, TlsMode};
 use serde::Serialize;
 
 pub use host::{
     HostProbe, InstalledServer, PkgFamily, adopt_script, firewall_script, install_script,
-    parse_probe, probe_script, reload_script, remove_site_script, uninstall_script, upgrade_script,
-    write_host_script, write_site_script,
+    parse_probe, probe_script, prune_static_script, reload_script, remove_site_script,
+    uninstall_script, upgrade_script, upload_static_script, write_host_script, write_site_script,
 };
 
 pub const EDGE_DIR: &str = "/etc/ikit/edge";
 pub const SITES_DIR: &str = "/etc/ikit/edge/sites";
 pub const HOST_FILE: &str = "/etc/ikit/edge/host.json";
+/// Files of static routes: `<org>/<workload>/<route dir>/<hash>/`.
+pub const WWW_DIR: &str = "/var/lib/ikit/edge/www";
 /// An empty site file, so the include glob always matches something.
 pub const PLACEHOLDER_SITE: &str = "000-ikit.conf";
 
@@ -106,6 +110,27 @@ pub fn site_file(org: &str, workload: &str) -> String {
     format!("{org}__{workload}.conf")
 }
 
+/// The folder of a route's static files on the host, e.g. `acme.com+docs` for
+/// `acme.com/docs`. Route hosts and paths only hold characters that are safe here.
+pub fn static_route_dir(route_key: &str) -> String {
+    route_key.replace('/', "+")
+}
+
+/// Where one upload of a static route's files lives on the host.
+pub fn static_root(org: &str, workload: &str, route_key: &str, hash: &str) -> String {
+    format!(
+        "{WWW_DIR}/{org}/{workload}/{}/{hash}",
+        static_route_dir(route_key)
+    )
+}
+
+/// The hex SHA-256 of a snippet, shortened, for the site header.
+fn snippet_hash(snippet: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(snippet.as_bytes());
+    digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// One workload's routes and redirects, rendered into its site file.
 #[derive(Debug, Clone)]
 pub struct SiteInput<'a> {
@@ -115,6 +140,8 @@ pub struct SiteInput<'a> {
     pub redirects: &'a [Redirect],
     /// This org's ACME email and CA.
     pub edge: &'a EdgeConfig,
+    /// The content hash of each static route's files, by route key.
+    pub static_hashes: &'a BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -127,18 +154,66 @@ pub enum EdgeRenderError {
     },
     #[error("{0} is both routed and redirected; remove one")]
     RoutedAndRedirected(String),
+    #[error("the files of static route {0} were not packed")]
+    MissingFiles(String),
+    #[error("route {0} keeps its path prefix, which only Caddy supports so far")]
+    KeepPrefixUnsupported(String),
+}
+
+/// What the proxy does with a route's requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Handler {
+    /// Proxies to `127.0.0.1:<port>` or `http(s)://host:port`.
+    Proxy(String),
+    /// Serves files from `root` on the host.
+    Files { root: String, spa: bool },
+}
+
+/// A route as the renderers see it.
+pub(crate) struct Served<'a> {
+    pub path: Option<&'a str>,
+    /// Pass the path prefix on instead of stripping it.
+    pub keep_prefix: bool,
+    pub handler: Handler,
+    pub snippet: Option<&'a str>,
 }
 
 /// A host's routes, longest path first so the most specific prefix wins.
 pub(crate) struct HostRoutes<'a> {
     pub host: &'a str,
     pub tls: TlsMode,
-    pub routes: Vec<&'a Route>,
+    pub routes: Vec<Served<'a>>,
 }
 
-fn group_by_host<'a>(routes: &'a [Route]) -> Result<Vec<HostRoutes<'a>>, EdgeRenderError> {
+impl HostRoutes<'_> {
+    /// Every route proxies and none has a snippet: the layout ikit always rendered.
+    pub fn plain_proxies(&self) -> bool {
+        self.routes
+            .iter()
+            .all(|r| matches!(r.handler, Handler::Proxy(_)) && r.snippet.is_none())
+    }
+}
+
+fn handler(input: &SiteInput<'_>, r: &Route) -> Result<Handler, EdgeRenderError> {
+    Ok(match &r.backend {
+        RouteBackend::Service => Handler::Proxy(format!("127.0.0.1:{}", r.upstream_port)),
+        RouteBackend::Address { url } => Handler::Proxy(url.clone()),
+        RouteBackend::Static { spa, .. } => {
+            let hash = input
+                .static_hashes
+                .get(&r.key())
+                .ok_or_else(|| EdgeRenderError::MissingFiles(r.key()))?;
+            Handler::Files {
+                root: static_root(input.org, input.workload, &r.key(), hash),
+                spa: *spa,
+            }
+        }
+    })
+}
+
+fn group_by_host<'a>(input: &SiteInput<'a>) -> Result<Vec<HostRoutes<'a>>, EdgeRenderError> {
     let mut hosts: BTreeMap<&str, Vec<&Route>> = BTreeMap::new();
-    for r in routes {
+    for r in input.routes {
         hosts.entry(&r.host).or_default().push(r);
     }
     hosts
@@ -153,14 +228,39 @@ fn group_by_host<'a>(routes: &'a [Route]) -> Result<Vec<HostRoutes<'a>>, EdgeRen
                 });
             }
             routes.sort_by_key(|r| std::cmp::Reverse(r.path.as_deref().map_or(0, |p| p.len())));
+            let routes = routes
+                .into_iter()
+                .map(|r| {
+                    Ok(Served {
+                        path: r.path.as_deref(),
+                        keep_prefix: r.keep_prefix,
+                        handler: handler(input, r)?,
+                        snippet: r.snippet.as_deref(),
+                    })
+                })
+                .collect::<Result<_, EdgeRenderError>>()?;
             Ok(HostRoutes { host, tls, routes })
+        })
+        .collect()
+}
+
+/// `lines` with every non-empty line indented by `indent`, each ending in a newline.
+pub(crate) fn indented(lines: &str, indent: &str) -> String {
+    lines
+        .lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                "\n".to_owned()
+            } else {
+                format!("{indent}{l}\n")
+            }
         })
         .collect()
 }
 
 /// The site file for one workload: the `# ikit` header, then the server's config.
 pub fn render_site(kind: EdgeKind, input: &SiteInput<'_>) -> Result<String, EdgeRenderError> {
-    let hosts = group_by_host(input.routes)?;
+    let hosts = group_by_host(input)?;
     if let Some(r) = input
         .redirects
         .iter()
@@ -179,10 +279,24 @@ pub fn render_site(kind: EdgeKind, input: &SiteInput<'_>) -> Result<String, Edge
                 path: r.path.clone(),
                 upstream: r.upstream_port,
                 tls: r.tls,
+                serve: match &r.backend {
+                    RouteBackend::Service => None,
+                    RouteBackend::Static { .. } => Some(format!(
+                        "static {}",
+                        input.static_hashes.get(&r.key()).map_or("", String::as_str)
+                    )),
+                    RouteBackend::Address { url } => Some(format!("address {url}")),
+                },
+                snippet: r.snippet.as_deref().map(snippet_hash),
             })
             .collect(),
         redirects: input.redirects.iter().map(|r| r.host.clone()).collect(),
     };
+    if kind == EdgeKind::Ferron
+        && let Some(r) = input.routes.iter().find(|r| r.keep_prefix)
+    {
+        return Err(EdgeRenderError::KeepPrefixUnsupported(r.key()));
+    }
     let body = match kind {
         EdgeKind::Caddy => caddy::render(&hosts, input.redirects, input.edge),
         EdgeKind::Ferron => ferron::render(&hosts, input.redirects, input.edge),
@@ -203,13 +317,35 @@ pub struct SiteHeader {
 pub struct HeaderRoute {
     pub host: String,
     pub path: Option<String>,
+    /// 0 for a route that does not go to a service.
     pub upstream: u16,
     pub tls: TlsMode,
+    /// What a non-service route serves: `static <hash>` or `address <url>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serve: Option<String>,
+    /// A short hash of the route's snippet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 impl HeaderRoute {
     pub fn key(&self) -> String {
         ikit_core::edge::route_key(&self.host, self.path.as_deref())
+    }
+
+    /// What the route serves, for plan output.
+    fn detail(&self) -> String {
+        let to = match self.serve.as_deref().and_then(|s| s.split_once(' ')) {
+            Some(("static", hash)) => format!("static files {}", &hash[..hash.len().min(12)]),
+            Some((_, url)) => url.to_owned(),
+            None => format!("127.0.0.1:{}", self.upstream),
+        };
+        let snippet = self
+            .snippet
+            .as_deref()
+            .map(|h| format!(" +snippet {h}"))
+            .unwrap_or_default();
+        format!("→ {to}{snippet} (tls {})", self.tls)
     }
 }
 
@@ -224,6 +360,15 @@ impl SiteHeader {
                 r.upstream,
                 r.tls
             ));
+        }
+        for r in &self.routes {
+            let path = r.path.as_deref().unwrap_or("/");
+            if let Some(serve) = &r.serve {
+                s.push_str(&format!("# ikit serve {} {path} {serve}\n", r.host));
+            }
+            if let Some(hash) = &r.snippet {
+                s.push_str(&format!("# ikit snippet {} {path} {hash}\n", r.host));
+            }
         }
         for host in &self.redirects {
             s.push_str(&format!("# ikit redirect {host}\n"));
@@ -273,13 +418,32 @@ pub fn parse_site_header(text: &str) -> Option<SiteHeader> {
                     path: (*path != "/").then(|| (*path).to_owned()),
                     upstream,
                     tls,
+                    serve: None,
+                    snippet: None,
                 });
+            }
+            (["serve", host, path, kind, value], Some(h)) => {
+                if let Some(r) = header_route(h, host, path) {
+                    r.serve = Some(format!("{kind} {value}"));
+                }
+            }
+            (["snippet", host, path, hash], Some(h)) => {
+                if let Some(r) = header_route(h, host, path) {
+                    r.snippet = Some((*hash).to_owned());
+                }
             }
             (["redirect", host], Some(h)) => h.redirects.push((*host).to_owned()),
             _ => {}
         }
     }
     header
+}
+
+fn header_route<'h>(h: &'h mut SiteHeader, host: &str, path: &str) -> Option<&'h mut HeaderRoute> {
+    let path = (path != "/").then_some(path);
+    h.routes
+        .iter_mut()
+        .find(|r| r.host == host && r.path.as_deref() == path)
 }
 
 /// One change `apply` would make to the workload's site.
@@ -310,12 +474,7 @@ pub fn diff_site(applied: Option<&str>, rendered: Option<&str>) -> Vec<EdgeChang
         };
         h.routes
             .iter()
-            .map(|r| {
-                (
-                    r.key(),
-                    format!("→ 127.0.0.1:{} (tls {})", r.upstream, r.tls),
-                )
-            })
+            .map(|r| (r.key(), r.detail()))
             .chain(
                 h.redirects
                     .iter()
@@ -368,8 +527,43 @@ pub(crate) mod tests {
             tls,
             upstream_port: upstream,
             origin: RouteOrigin::Manual,
+            backend: RouteBackend::Service,
+            snippet: None,
+            keep_prefix: false,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn static_route(host: &str, path: Option<&str>, spa: bool) -> Route {
+        Route {
+            service: String::new(),
+            port: 0,
+            backend: RouteBackend::Static {
+                source: "/src/site".into(),
+                spa,
+            },
+            ..route(host, path, 0, TlsMode::Acme)
+        }
+    }
+
+    pub fn address_route(host: &str, path: Option<&str>, url: &str) -> Route {
+        Route {
+            service: String::new(),
+            port: 0,
+            backend: RouteBackend::Address { url: url.into() },
+            ..route(host, path, 0, TlsMode::Acme)
+        }
+    }
+
+    pub const SNIPPET_CADDY: &str = "header X-Frame-Options DENY";
+    pub const SNIPPET_FERRON: &str = "header X-Frame-Options DENY";
+
+    pub fn hashes(routes: &[Route]) -> BTreeMap<String, String> {
+        routes
+            .iter()
+            .filter(|r| matches!(r.backend, RouteBackend::Static { .. }))
+            .map(|r| (r.key(), "abcdef0123456789".to_owned()))
+            .collect()
     }
 
     pub fn redirect(host: &str, to: &str) -> Redirect {
@@ -406,6 +600,7 @@ pub(crate) mod tests {
             routes: &routes,
             redirects: &redirects,
             edge: &e,
+            static_hashes: &BTreeMap::new(),
         };
         let text = render_site(EdgeKind::Caddy, &input).unwrap();
         let h = parse_site_header(&text).unwrap();
@@ -423,6 +618,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn static_files_and_snippets_show_in_the_diff() {
+        let e = edge(EdgeKind::Caddy);
+        let render = |routes: &[Route], hash: &str| {
+            let hashes = routes
+                .iter()
+                .filter(|r| !r.is_service())
+                .map(|r| (r.key(), hash.to_owned()))
+                .collect();
+            render_site(
+                EdgeKind::Caddy,
+                &SiteInput {
+                    org: "acme",
+                    workload: "w",
+                    routes,
+                    redirects: &[],
+                    edge: &e,
+                    static_hashes: &hashes,
+                },
+            )
+        };
+        let site = [static_route("a.acme.com", Some("/docs"), false)];
+        let a = render(&site, "1111111111111111").unwrap();
+        let h = parse_site_header(&a).unwrap();
+        assert_eq!(
+            h.routes[0].serve.as_deref(),
+            Some("static 1111111111111111")
+        );
+        assert_eq!(h.routes[0].upstream, 0);
+        let b = render(&site, "2222222222222222").unwrap();
+        assert_eq!(
+            diff_site(Some(&a), Some(&b)),
+            vec![EdgeChange::Update {
+                site: "a.acme.com/docs".into(),
+                detail: "→ static files 111111111111 (tls acme) ⇒ \
+                         → static files 222222222222 (tls acme)"
+                    .into()
+            }]
+        );
+        let snipped = [Route {
+            snippet: Some("encode gzip".into()),
+            ..site[0].clone()
+        }];
+        let c = render(&snipped, "2222222222222222").unwrap();
+        let change = &diff_site(Some(&b), Some(&c))[0];
+        assert!(matches!(change, EdgeChange::Update { detail, .. } if detail.contains("+snippet")));
+        assert!(matches!(
+            render(&site, "x").map(|_| ()).and_then(|_| render_site(
+                EdgeKind::Caddy,
+                &SiteInput {
+                    org: "acme",
+                    workload: "w",
+                    routes: &site,
+                    redirects: &[],
+                    edge: &e,
+                    static_hashes: &BTreeMap::new(),
+                },
+            )),
+            Err(EdgeRenderError::MissingFiles(_))
+        ));
+    }
+
+    #[test]
     fn refuses_mixed_tls_and_routed_redirects() {
         let e = edge(EdgeKind::Caddy);
         let routes = [
@@ -435,6 +692,7 @@ pub(crate) mod tests {
             routes: &routes,
             redirects: &[],
             edge: &e,
+            static_hashes: &BTreeMap::new(),
         };
         assert!(matches!(
             render_site(EdgeKind::Caddy, &input),
@@ -462,6 +720,7 @@ pub(crate) mod tests {
                     routes,
                     redirects: &[],
                     edge: e,
+                    static_hashes: &BTreeMap::new(),
                 },
             )
             .unwrap()
@@ -510,10 +769,33 @@ pub(crate) mod tests {
             route("acme.com", Some("/api"), 20001, TlsMode::Acme),
             route("admin.acme.com", None, 20002, TlsMode::Internal),
             route("plain.acme.com", Some("/v1"), 20003, TlsMode::Off),
+            // Plain HTTP, so `curl` can try them against a running proxy.
+            Route {
+                tls: TlsMode::Off,
+                ..static_route("site.acme.com", None, true)
+            },
+            Route {
+                tls: TlsMode::Off,
+                ..static_route("site.acme.com", Some("/docs"), false)
+            },
+            Route {
+                tls: TlsMode::Off,
+                ..address_route("site.acme.com", Some("/api"), "http://127.0.0.1:3000")
+            },
+            Route {
+                tls: TlsMode::Off,
+                snippet: Some(SNIPPET_CADDY.into()),
+                ..static_route("spa.acme.com", Some("/app"), true)
+            },
         ];
         let mut redirects = [redirect("www.acme.com", "https://acme.com")];
         redirects[0].permanent = false;
+        let static_hashes = hashes(&routes);
         for kind in EdgeKind::ALL {
+            let mut routes = routes.clone();
+            if *kind == EdgeKind::Ferron {
+                routes.last_mut().unwrap().snippet = Some(SNIPPET_FERRON.into());
+            }
             let e = EdgeConfig {
                 ca: ikit_core::AcmeCa::Staging,
                 ..edge(*kind)
@@ -526,6 +808,7 @@ pub(crate) mod tests {
                     routes: &routes,
                     redirects: &redirects,
                     edge: &e,
+                    static_hashes: &static_hashes,
                 },
             )
             .unwrap();
@@ -551,6 +834,14 @@ pub(crate) mod tests {
                     write_site_script(*kind, "acme__w.conf", &["acme.com", "www.acme.com"]),
                 ),
                 ("remove_site.sh", remove_site_script(*kind, "acme__w.conf")),
+                (
+                    "upload_static.sh",
+                    upload_static_script("acme", "w", "acme.com/docs", "h2"),
+                ),
+                (
+                    "prune_static.sh",
+                    prune_static_script("acme", "w", &[("acme.com/docs", "h2")]),
+                ),
                 (
                     "uninstall.sh",
                     uninstall_script(*kind, PkgFamily::Apt, true, false),

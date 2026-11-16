@@ -31,6 +31,9 @@ string_enum! {
     pub enum HookPhase {
         /// Before the compose files are written and services started.
         PreApply => "pre-apply",
+        /// After the data services are up and healthy, before the app and platform services
+        /// start: for creating databases and roles the services need at startup.
+        PostData => "post-data",
         /// After services are up and healthy.
         PostApply => "post-apply",
         /// Before containers are removed.

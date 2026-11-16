@@ -9,7 +9,7 @@ use ikit_core::registry::{
     ImportMode, ImportReport, RegistryLogin, ServiceDef, Source, Usage, VersionDef,
 };
 use ikit_core::target::{Check, TargetOrigin};
-use ikit_core::{AutoRoutes, EdgeConfig, Redirect, Route, RouteOrigin, TlsMode};
+use ikit_core::{AutoRoutes, EdgeConfig, Redirect, Route, RouteBackend, RouteOrigin, TlsMode};
 use ikit_core::{
     Backend, BackendOptions, Backup, Binding, Category, Connection, DockerNetwork, Hook,
     HookAction, HookPhase, HookRunRecord, Identity, Network, NetworkOrigin, Profile, ProfileKind,
@@ -335,6 +335,14 @@ pub trait NetworkRepo: Send + Sync {
     ) -> Result<u64>;
     /// A workload's external Docker networks, by name then group.
     async fn docker_networks(&self, workload_id: i64) -> Result<Vec<DockerNetwork>>;
+    /// Links `consumer` to `provider`. Returns false if it already was.
+    async fn link_workload(&self, consumer_id: i64, provider_id: i64) -> Result<bool>;
+    /// Returns whether the link existed.
+    async fn unlink_workload(&self, consumer_id: i64, provider_id: i64) -> Result<bool>;
+    /// Names of the workloads `consumer` links to, sorted.
+    async fn providers_of(&self, consumer_id: i64) -> Result<Vec<String>>;
+    /// Names of the workloads that link to `provider`, sorted.
+    async fn consumers_of(&self, provider_id: i64) -> Result<Vec<String>>;
 }
 
 #[async_trait]
@@ -347,6 +355,14 @@ pub trait EdgeRepo: Send + Sync {
     async fn insert_route(&self, workload_id: i64, new: NewRoute<'_>) -> Result<Route>;
     /// Returns whether the route existed.
     async fn delete_route(&self, workload_id: i64, host: &str, path: Option<&str>) -> Result<bool>;
+    /// Sets or clears a route's snippet; returns whether the route exists.
+    async fn set_route_snippet(
+        &self,
+        workload_id: i64,
+        host: &str,
+        path: Option<&str>,
+        snippet: Option<&str>,
+    ) -> Result<bool>;
     /// Removes a service's routes, e.g. when the service is removed.
     async fn delete_service_routes(&self, workload_id: i64, service: &str) -> Result<u64>;
     async fn redirects(&self, workload_id: i64) -> Result<Vec<Redirect>>;
@@ -369,6 +385,9 @@ pub struct NewRoute<'a> {
     pub tls: TlsMode,
     pub upstream_port: u16,
     pub origin: RouteOrigin,
+    pub backend: &'a RouteBackend,
+    pub snippet: Option<&'a str>,
+    pub keep_prefix: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

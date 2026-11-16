@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO routes\n                 (workload_id, service, port, host, path, tls, upstream_port, origin,\n                  backend_json, snippet, created_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ba6cc1865a78ca66878f51f1c33658fcc91280cb28bac030ca0c923685aecf88"
+}

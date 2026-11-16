@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use ikit_core::registry::EnvVar;
 use ikit_core::resource::parse_reference;
+use ikit_core::template::{Part, own_env_ref, parse_template, template_body};
 use ikit_core::{Category, DockerNetwork, ResourceApi, ServiceInstance, ServiceSpec};
 use serde::Serialize;
 
@@ -31,11 +32,36 @@ pub struct ResourceValues {
     pub fields: BTreeMap<String, String>,
 }
 
+/// Another workload this one is linked to: its app and platform services answer here as
+/// `<workload>-<service>` on its link network.
+#[derive(Debug, Clone)]
+pub struct LinkedWorkload {
+    pub workload: String,
+    pub services: Vec<ServiceInput>,
+}
+
+/// The Docker network a workload offers to the workloads linked to it. ikit creates it on
+/// the target before either side is applied, so it is `external` in both compose files.
+pub fn link_network_name(workload: &str) -> String {
+    format!("{workload}-link")
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkloadInput {
     pub org: String,
     pub workload: String,
+    /// The workload's env (`dev`, `prod`, ...), for `{{env}}` in templates.
+    pub env: String,
     pub services: Vec<ServiceInput>,
+    /// Workloads whose services this one reaches by `service:` references.
+    pub linked: Vec<LinkedWorkload>,
+    /// Other workloads link to this one, so its app and platform services join its link
+    /// network.
+    pub offers_link: bool,
+    /// Domains that must resolve to the target's host from inside containers (the
+    /// workload's own and linked route hosts), so a service calling its public URL reaches
+    /// the reverse proxy instead of itself.
+    pub host_aliases: Vec<String>,
     /// The ZeroTier network a sidecar container joins, if the workload runs one.
     pub zerotier: Option<ZtSidecar>,
     /// Docker networks outside the workload that a group joins as `external: true`.
@@ -128,6 +154,10 @@ struct ComposeService {
     environment: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ports: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    extra_hosts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shm_size: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     volumes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,60 +287,144 @@ fn resolve_resource(s: &ServiceInput, name: &str, field: &str) -> Result<Option<
     }))
 }
 
-/// Resolves `service:<name>.host | .port | .port.<port name> | .env.<VAR> | .url`. `<name>` is a
-/// service instance, or a registry service if exactly one instance uses it. A `.host` must
-/// be on a network that a service in `from` joins.
-fn resolve_ref(
-    reference: &str,
-    from: Category,
-    services: &[ServiceInput],
-) -> Result<Resolved, String> {
+/// A service a `service:` reference found: in this workload, or in a linked one.
+struct Found<'a> {
+    svc: &'a ServiceInput,
+    /// The linked workload it runs in; `None` for this workload.
+    linked: Option<&'a str>,
+}
+
+/// Finds `name` among `services`: an instance name, or a registry service with exactly one
+/// instance.
+fn find_service<'a>(
+    name: &str,
+    services: &'a [ServiceInput],
+) -> Result<Option<&'a ServiceInput>, String> {
+    if let Some(s) = services.iter().find(|s| s.instance.name == name) {
+        return Ok(Some(s));
+    }
+    let matches: Vec<&ServiceInput> = services
+        .iter()
+        .filter(|s| s.instance.registry_service == name)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        _ => Err(format!(
+            "`{name}` matches several services; use an instance name"
+        )),
+    }
+}
+
+/// `name` in this workload first, then in the linked ones. `<workload>/<name>` picks a
+/// linked workload explicitly.
+fn find_ref<'a>(name: &str, input: &'a WorkloadInput) -> Result<Found<'a>, String> {
+    if let Some((wl, svc)) = name.split_once('/') {
+        let linked = input
+            .linked
+            .iter()
+            .find(|l| l.workload == wl)
+            .ok_or_else(|| {
+                format!(
+                    "`{wl}` is not linked to {} (see `ikit wl link`)",
+                    input.workload
+                )
+            })?;
+        let svc = find_service(svc, &linked.services)?
+            .ok_or_else(|| format!("`{svc}` is not a service in {wl}"))?;
+        return Ok(Found {
+            svc,
+            linked: Some(&linked.workload),
+        });
+    }
+    if let Some(svc) = find_service(name, &input.services)? {
+        return Ok(Found { svc, linked: None });
+    }
+    let mut hits = Vec::new();
+    for l in &input.linked {
+        if let Some(svc) = find_service(name, &l.services)? {
+            hits.push(Found {
+                svc,
+                linked: Some(&l.workload),
+            });
+        }
+    }
+    match hits.len() {
+        0 if input.linked.is_empty() => Err(format!("`{name}` is not a service in this workload")),
+        0 => Err(format!(
+            "`{name}` is not a service in this workload or the ones linked to it"
+        )),
+        1 => Ok(hits.remove(0)),
+        _ => Err(format!(
+            "`{name}` runs in several linked workloads ({}); use service:<workload>/{name}",
+            hits.iter()
+                .filter_map(|h| h.linked)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The groups that join link networks: data services stay private to their workload.
+fn joins_links(group: Category) -> bool {
+    group != Category::Data
+}
+
+/// Resolves `service:<name>.host | .port | .port.<port name> | .env.<VAR> | .url |
+/// .internal_url`. `<name>` is a service instance, or a registry service if exactly one
+/// instance uses it, in this workload or a linked one. A `.host` must be on a network that
+/// a service in `from` joins.
+fn resolve_ref(reference: &str, from: Category, input: &WorkloadInput) -> Result<Resolved, String> {
     let rest = reference.strip_prefix("service:").ok_or_else(|| {
         format!("unsupported reference `{reference}` (expected service:<name>.<field>)")
     })?;
     let (name, field) = rest
         .split_once('.')
         .ok_or_else(|| format!("reference `{reference}` has no field"))?;
-    let by_instance = services.iter().find(|s| s.instance.name == name);
-    let target = match by_instance {
-        Some(t) => t,
-        None => {
-            let matches: Vec<&ServiceInput> = services
-                .iter()
-                .filter(|s| s.instance.registry_service == name)
-                .collect();
-            match matches.as_slice() {
-                [one] => *one,
-                [] => return Err(format!("`{name}` is not a service in this workload")),
-                _ => {
-                    return Err(format!(
-                        "`{name}` matches several services; use an instance name"
-                    ));
-                }
-            }
-        }
-    };
+    let found = find_ref(name, input)?;
+    let target = found.svc;
     let plain = |value: String| {
         Ok(Resolved {
             value,
             secret: false,
         })
     };
-    match field.split_once('.') {
-        None if field == "host" => {
-            let group = target.instance.group;
-            if !reachable_groups(from).contains(&group) {
-                return Err(format!(
-                    "`{}` is in the {group} group, which a {from} service cannot reach",
-                    target.instance.name
-                ));
+    let host = || -> Result<String, String> {
+        let group = target.instance.group;
+        match found.linked {
+            None => {
+                if !reachable_groups(from).contains(&group) {
+                    return Err(format!(
+                        "`{}` is in the {group} group, which a {from} service cannot reach",
+                        target.instance.name
+                    ));
+                }
+                Ok(target.instance.name.clone())
             }
-            plain(target.instance.name.clone())
+            Some(wl) => {
+                if !joins_links(group) {
+                    return Err(format!(
+                        "`{}` is a {group} service of {wl}; data services are not shared with linked workloads",
+                        target.instance.name
+                    ));
+                }
+                if !joins_links(from) {
+                    return Err(format!(
+                        "a {from} service cannot reach the linked workload {wl}"
+                    ));
+                }
+                Ok(format!("{wl}-{}", target.instance.name))
+            }
         }
-        None if field == "port" => match target.spec.ports.first() {
-            Some(p) => plain(p.container.to_string()),
-            None => Err(format!("`{}` exposes no ports", target.instance.name)),
-        },
+    };
+    let first_port = || match target.spec.ports.first() {
+        Some(p) => Ok(p.container.to_string()),
+        None => Err(format!("`{}` exposes no ports", target.instance.name)),
+    };
+    match field.split_once('.') {
+        None if field == "host" => plain(host()?),
+        None if field == "port" => plain(first_port()?),
+        None if field == "internal_url" => plain(format!("http://{}:{}", host()?, first_port()?)),
         Some(("port", port_name)) => match target
             .spec
             .ports
@@ -339,8 +453,98 @@ fn resolve_ref(
                 .ok_or_else(|| format!("`{}` env var {var} has no value", target.instance.name))
         }
         _ => Err(format!(
-            "unknown field `{field}` in `{reference}` (use host, port, port.<name>, env.<VAR> or url)"
+            "unknown field `{field}` in `{reference}` (use host, port, port.<name>, env.<VAR>, url or internal_url)"
         )),
+    }
+}
+
+/// How deep `env.<VAR>` placeholders may chain before ikit calls it a loop.
+const MAX_TEMPLATE_DEPTH: usize = 8;
+
+/// The value of `var` on `s`: set on the instance, or from its `from:` reference or
+/// template, or the registry default. `Ok(None)` when it has none.
+fn resolve_var(
+    s: &ServiceInput,
+    var: &EnvVar,
+    input: &WorkloadInput,
+    depth: usize,
+) -> Result<Option<Resolved>, String> {
+    let inst = &s.instance;
+    let Some(reference) = &var.from else {
+        return Ok(direct_value(s, var));
+    };
+    // A value set on the instance wins over the reference.
+    if inst.env.contains_key(&var.name) || s.secrets.contains_key(&var.name) {
+        return Ok(direct_value(s, var));
+    }
+    if let Some(body) = template_body(reference) {
+        return resolve_template(body, s, input, depth);
+    }
+    match parse_reference(reference) {
+        Some(parsed) => {
+            let (name, field) = parsed?;
+            resolve_resource(s, name, field)
+        }
+        None => resolve_ref(reference, inst.group, input).map(Some),
+    }
+}
+
+/// Fills a template's placeholders. A placeholder without a value leaves the whole value
+/// unset; the result is secret if any part is.
+fn resolve_template(
+    body: &str,
+    s: &ServiceInput,
+    input: &WorkloadInput,
+    depth: usize,
+) -> Result<Option<Resolved>, String> {
+    if depth > MAX_TEMPLATE_DEPTH {
+        return Err("env.<VAR> placeholders loop".to_owned());
+    }
+    let mut value = String::new();
+    let mut secret = false;
+    for part in parse_template(body)? {
+        let r = match part {
+            Part::Text(t) => {
+                value.push_str(t);
+                continue;
+            }
+            Part::Ref(r) => r,
+        };
+        let resolved = match r {
+            "org" => Some(input.org.clone().into()),
+            "workload" => Some(input.workload.clone().into()),
+            "env" => Some(input.env.clone().into()),
+            "service" => Some(s.instance.name.clone().into()),
+            _ => {
+                if let Some(name) = own_env_ref(r) {
+                    let var = s
+                        .spec
+                        .env_var(name)
+                        .ok_or_else(|| format!("`{}` has no env var {name}", s.instance.name))?;
+                    resolve_var(s, var, input, depth + 1)?
+                } else if let Some(parsed) = parse_reference(r) {
+                    let (name, field) = parsed?;
+                    resolve_resource(s, name, field)?
+                } else {
+                    Some(resolve_ref(r, s.instance.group, input)?)
+                }
+            }
+        };
+        let Some(resolved) = resolved else {
+            return Ok(None);
+        };
+        secret |= resolved.secret;
+        value.push_str(&resolved.value);
+    }
+    Ok(Some(Resolved { value, secret }))
+}
+
+impl From<String> for Resolved {
+    fn from(value: String) -> Self {
+        Resolved {
+            value,
+            secret: false,
+        }
     }
 }
 
@@ -383,43 +587,51 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
             },
         );
     }
+    // Link networks: the one this workload offers, and the ones of workloads it links to.
+    // Only app and platform services join them.
+    let mut link_networks: Vec<String> = Vec::new();
+    if input.offers_link {
+        link_networks.push(link_network_name(&input.workload));
+    }
+    link_networks.extend(input.linked.iter().map(|l| link_network_name(&l.workload)));
+    let any_linking = groups.iter().any(|g| joins_links(*g));
+    if any_linking {
+        for name in &link_networks {
+            networks.insert(
+                name.clone(),
+                ComposeNetwork {
+                    name: Some(name.clone()),
+                    external: true,
+                },
+            );
+        }
+    }
 
     for s in &input.services {
         let inst = &s.instance;
         let mut environment = BTreeMap::new();
         let mut secret_env = BTreeMap::new();
         for var in &s.spec.env {
-            let resolved = match &var.from {
-                // A value set on the instance wins over the reference.
-                Some(_)
-                    if inst.env.contains_key(&var.name) || s.secrets.contains_key(&var.name) =>
-                {
-                    direct_value(s, var)
-                }
-                Some(reference) => {
-                    let env_error = |message| RenderError::Env {
-                        service: inst.name.clone(),
-                        var: var.name.clone(),
-                        message,
-                    };
-                    match parse_reference(reference) {
-                        Some(parsed) => {
-                            let (name, field) = parsed.map_err(env_error)?;
-                            resolve_resource(s, name, field).map_err(env_error)?
-                        }
-                        None => Some(
-                            resolve_ref(reference, inst.group, &input.services)
-                                .map_err(env_error)?,
-                        ),
-                    }
-                }
-                None => direct_value(s, var),
-            };
+            let resolved = resolve_var(s, var, input, 0).map_err(|message| RenderError::Env {
+                service: inst.name.clone(),
+                var: var.name.clone(),
+                message,
+            })?;
             match resolved {
                 Some(r) if r.secret || var.secret => {
                     secret_env.insert(var.name.clone(), escape(&r.value))
                 }
                 Some(r) => environment.insert(var.name.clone(), escape(&r.value)),
+                None if var.generate.is_some() => {
+                    return Err(RenderError::Env {
+                        service: inst.name.clone(),
+                        var: var.name.clone(),
+                        message: format!(
+                            "generated secret is missing (create it with `ikit svc set {} --generate {}`)",
+                            inst.name, var.name
+                        ),
+                    });
+                }
                 None if var.required => {
                     return Err(RenderError::Env {
                         service: inst.name.clone(),
@@ -513,6 +725,27 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                 },
             );
         }
+        if joins_links(inst.group) {
+            for name in &link_networks {
+                // Linked workloads reach this service as `<workload>-<service>`, which is
+                // unique on the target however many workloads share the network.
+                let aliases = if input.offers_link && *name == link_network_name(&input.workload) {
+                    vec![format!("{}-{}", input.workload, inst.name)]
+                } else {
+                    vec![]
+                };
+                service_networks.insert(name.clone(), ServiceNetwork { aliases });
+            }
+        }
+        let extra_hosts: Vec<String> = if inst.group == Category::Data {
+            vec![]
+        } else {
+            input
+                .host_aliases
+                .iter()
+                .map(|h| format!("{h}:host-gateway"))
+                .collect()
+        };
 
         let labels = BTreeMap::from([
             ("ikit.org".to_owned(), input.org.clone()),
@@ -550,6 +783,8 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                 devices: vec![],
                 environment,
                 ports,
+                extra_hosts,
+                shm_size: s.spec.shm_size.clone(),
                 volumes: mounts,
                 healthcheck,
                 depends_on,
@@ -578,6 +813,8 @@ pub fn render(input: &WorkloadInput) -> Result<Rendered, RenderError> {
                 devices: vec!["/dev/net/tun"],
                 environment: BTreeMap::new(),
                 ports: vec![],
+                extra_hosts: vec![],
+                shm_size: None,
                 volumes: vec![format!("{ZT_SIDECAR}:{ZT_HOME}")],
                 healthcheck: None,
                 depends_on: BTreeMap::new(),
@@ -751,6 +988,10 @@ pub(crate) mod tests {
             ],
             zerotier: None,
             external_networks: vec![],
+            env: "dev".into(),
+            linked: vec![],
+            offers_link: false,
+            host_aliases: vec![],
         }
     }
 
@@ -1065,5 +1306,179 @@ pub(crate) mod tests {
             image_registry("123.dkr.ecr.eu-west-1.amazonaws.com/api:1"),
             "123.dkr.ecr.eu-west-1.amazonaws.com"
         );
+    }
+
+    fn from_var(name: &str, from: &str) -> EnvVar {
+        EnvVar {
+            name: name.into(),
+            from: Some(from.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A platform workload `wl-acme-dev-002` with `decision-hub` (port 8080) and a postgres.
+    fn platform() -> LinkedWorkload {
+        let mut hub = instance(
+            "decision-hub",
+            "decision-hub",
+            "1.0.0",
+            "ghcr.io/acme/decision-hub:1",
+        );
+        hub.group = Category::Platform;
+        let spec = ServiceSpec {
+            ports: vec![Port {
+                container: 8080,
+                name: Some("http".into()),
+                protocol: Protocol::Tcp,
+            }],
+            ..Default::default()
+        };
+        let pg = sample().services.remove(0);
+        LinkedWorkload {
+            workload: "wl-acme-dev-002".into(),
+            services: vec![
+                ServiceInput {
+                    instance: hub,
+                    spec,
+                    secrets: BTreeMap::new(),
+                    urls: vec![],
+                    resources: BTreeMap::new(),
+                },
+                pg,
+            ],
+        }
+    }
+
+    #[test]
+    fn templates_fill_references_own_env_and_context() {
+        let mut input = sample();
+        let api = &mut input.services[1];
+        api.spec.env.extend([
+            EnvVar {
+                name: "DB_NAME".into(),
+                default: Some("{{service}}".into()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "DB_USER".into(),
+                default: Some("orders".into()),
+                ..Default::default()
+            },
+            from_var(
+                "DATABASE_URL",
+                "template:postgresql://{{env.DB_USER}}:{{service:postgres.env.POSTGRES_PASSWORD}}@{{service:postgres.host}}:{{service:postgres.port}}/{{env.DB_USER}}_{{env}}",
+            ),
+            from_var("WHERE", "template:{{org}}/{{workload}}/{{service}}"),
+        ]);
+        let r = render(&input).unwrap();
+        let c = yaml(&r.compose);
+        let env = &c["services"]["orders-api"]["environment"];
+        assert_eq!(env["WHERE"], "acme/wl-acme-dev-001/orders-api");
+        assert!(
+            env.get("DATABASE_URL").is_none(),
+            "a secret part makes it secret"
+        );
+        let sec = yaml(&r.secrets);
+        assert_eq!(
+            sec["services"]["orders-api"]["environment"]["DATABASE_URL"],
+            "postgresql://orders:pa$$$$word@postgres:5432/orders_dev"
+        );
+    }
+
+    #[test]
+    fn templates_report_loops_and_unknown_vars() {
+        let mut input = sample();
+        input.services[1].spec.env.extend([
+            from_var("A", "template:{{env.B}}"),
+            from_var("B", "template:{{env.A}}"),
+        ]);
+        let err = render(&input).unwrap_err().to_string();
+        assert!(err.contains("loop"), "{err}");
+    }
+
+    #[test]
+    fn linked_services_resolve_to_their_prefixed_alias() {
+        let mut input = sample();
+        input.linked = vec![platform()];
+        input.services[1].spec.env.extend([
+            from_var("HUB", "service:decision-hub.internal_url"),
+            from_var("HUB_HOST", "service:wl-acme-dev-002/decision-hub.host"),
+        ]);
+        let c = yaml(&render(&input).unwrap().compose);
+        let api = &c["services"]["orders-api"];
+        assert_eq!(
+            api["environment"]["HUB"],
+            "http://wl-acme-dev-002-decision-hub:8080"
+        );
+        assert_eq!(
+            api["environment"]["HUB_HOST"],
+            "wl-acme-dev-002-decision-hub"
+        );
+        // The local postgres still wins over the linked workload's.
+        assert_eq!(api["environment"]["DB_HOST"], "postgres");
+        // App services join the provider's link network; data services do not.
+        assert_eq!(api["networks"]["wl-acme-dev-002-link"], yaml("{}"));
+        assert!(
+            c["services"]["postgres"]["networks"]
+                .get("wl-acme-dev-002-link")
+                .is_none()
+        );
+        assert_eq!(c["networks"]["wl-acme-dev-002-link"]["external"], true);
+    }
+
+    #[test]
+    fn linked_data_services_are_not_reachable() {
+        let mut input = sample();
+        input.services.remove(0);
+        input.services[0].spec.env.retain(|e| e.from.is_none());
+        input.services[0].spec.depends_on.clear();
+        input.linked = vec![platform()];
+        input.services[0]
+            .spec
+            .env
+            .push(from_var("PG", "service:postgres.host"));
+        let err = render(&input).unwrap_err().to_string();
+        assert!(err.contains("data services are not shared"), "{err}");
+    }
+
+    #[test]
+    fn a_provider_offers_its_link_network_with_aliases() {
+        let mut input = sample();
+        input.offers_link = true;
+        let c = yaml(&render(&input).unwrap().compose);
+        assert_eq!(
+            c["services"]["orders-api"]["networks"]["wl-acme-dev-001-link"]["aliases"][0],
+            "wl-acme-dev-001-orders-api"
+        );
+        assert!(
+            c["services"]["postgres"]["networks"]
+                .get("wl-acme-dev-001-link")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn host_aliases_and_shm_size_render() {
+        let mut input = sample();
+        input.host_aliases = vec!["dev-001.localhost".into()];
+        input.services[1].spec.shm_size = Some("2gb".into());
+        let c = yaml(&render(&input).unwrap().compose);
+        let api = &c["services"]["orders-api"];
+        assert_eq!(api["extra_hosts"][0], "dev-001.localhost:host-gateway");
+        assert_eq!(api["shm_size"], "2gb");
+        assert!(c["services"]["postgres"].get("extra_hosts").is_none());
+    }
+
+    #[test]
+    fn a_missing_generated_secret_says_how_to_create_it() {
+        let mut input = sample();
+        input.services[1].spec.env.push(EnvVar {
+            name: "KEY".into(),
+            secret: true,
+            generate: Some(ikit_core::Generate::Hex32),
+            ..Default::default()
+        });
+        let err = render(&input).unwrap_err().to_string();
+        assert!(err.contains("--generate KEY"), "{err}");
     }
 }

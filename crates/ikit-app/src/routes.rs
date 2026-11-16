@@ -5,10 +5,13 @@
 use std::collections::BTreeMap;
 
 use ikit_core::config::default_port_name;
-use ikit_core::edge::{expand_host_template, is_hostname, parse_redirect_target, parse_route_path};
+use ikit_core::edge::{
+    check_snippet, expand_host_template, is_hostname, parse_redirect_target, parse_route_path,
+    parse_upstream_url,
+};
 use ikit_core::{
-    AutoRoutes, Category, PublishedPort, Redirect, Route, RouteOrigin, ServiceInstance,
-    ServiceSpec, TlsMode, Workload,
+    AutoRoutes, Category, PublishedPort, Redirect, Route, RouteBackend, RouteOrigin,
+    ServiceInstance, ServiceSpec, TlsMode, Workload,
 };
 use ikit_state::{NewRedirect, NewRoute};
 use serde::Serialize;
@@ -16,9 +19,11 @@ use serde::Serialize;
 use crate::ports::ClaimScope;
 use crate::{App, AppError, Result};
 
-/// What `ikit route add` asks for.
+/// What `ikit route add` asks for: a service port, a folder of static files
+/// (`static_dir`) or an address (`to`).
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
+    /// Empty for a static or address route.
     pub service: String,
     /// A container port number or a registry port name; default: the port named `http`,
     /// else the service's first TCP port.
@@ -28,6 +33,14 @@ pub struct RouteRequest {
     pub path: Option<String>,
     /// Default: the org's `edge.default_tls`.
     pub tls: Option<TlsMode>,
+    /// Serve the files of this folder (on the machine running ikit) instead of a service.
+    pub static_dir: Option<std::path::PathBuf>,
+    /// With `static_dir`: send requests for missing files to `index.html`.
+    pub spa: bool,
+    /// Proxy to this address instead of a service: a port, `host:port` or a URL.
+    pub to: Option<String>,
+    /// With `path`: pass the prefix on instead of stripping it (apps under a base path).
+    pub keep_prefix: bool,
 }
 
 /// A workload's routes, redirects and automatic-route settings.
@@ -55,6 +68,12 @@ impl App {
     /// Routes a domain (and optional path prefix) to a service port. Takes effect on the
     /// next apply.
     pub async fn route_add(&self, workload: &str, req: RouteRequest) -> Result<Route> {
+        if req.static_dir.is_some() || req.to.is_some() {
+            return self.route_add_other(workload, req).await;
+        }
+        if req.spa {
+            return Err(AppError::Invalid("--spa needs --static <folder>".into()));
+        }
         let wl = self.workload_get(workload).await?;
         let services = self.store.workloads().services(wl.id).await?;
         let service = services
@@ -67,15 +86,7 @@ impl App {
         let port = route_port(service, &spec, req.port.as_deref())?;
         let config = self.config()?;
         let host = match req.host {
-            Some(h) => {
-                let h = h.to_ascii_lowercase();
-                if !is_hostname(&h) {
-                    return Err(AppError::Invalid(format!(
-                        "`{h}` is not a domain name (wildcards are not supported)"
-                    )));
-                }
-                h
-            }
+            Some(h) => parse_host(&h)?,
             None => self.template_host(&wl, &service.name)?,
         };
         let path = req
@@ -85,6 +96,9 @@ impl App {
             .transpose()
             .map_err(AppError::Invalid)?
             .flatten();
+        if req.keep_prefix && path.is_none() {
+            return Err(AppError::Invalid("--keep-prefix needs --path".into()));
+        }
         let tls = req.tls.unwrap_or(config.edge.default_tls);
         self.check_host_free(&wl, &host, Some(tls)).await?;
         let upstream_port = self.upstream_port(&wl, &service.name, port).await?;
@@ -96,31 +110,141 @@ impl App {
             tls,
             upstream_port,
             origin: RouteOrigin::Manual,
+            backend: &RouteBackend::Service,
+            snippet: None,
+            keep_prefix: req.keep_prefix,
         };
-        // A manual route replaces the automatic one for the same host and path.
+        let route = self.insert_manual_route(&wl, new).await?;
+        self.share_port_claims(&wl.target).await;
+        Ok(route)
+    }
+
+    /// A route to a folder of static files or to an address; it needs `--host`.
+    async fn route_add_other(&self, workload: &str, req: RouteRequest) -> Result<Route> {
+        let wl = self.workload_get(workload).await?;
+        if !req.service.is_empty() || req.port.is_some() {
+            return Err(AppError::Invalid(
+                "a route goes to a service, --static or --to; pick one".into(),
+            ));
+        }
+        let backend = match (req.static_dir, req.to) {
+            (Some(_), Some(_)) => {
+                return Err(AppError::Invalid("pick one of --static and --to".into()));
+            }
+            (Some(dir), None) => {
+                let abs = std::fs::canonicalize(&dir).map_err(|e| {
+                    AppError::Invalid(format!("the static folder {}: {e}", dir.display()))
+                })?;
+                if !abs.is_dir() {
+                    return Err(AppError::Invalid(format!(
+                        "{} is not a folder",
+                        abs.display()
+                    )));
+                }
+                let source = abs.to_str().ok_or_else(|| {
+                    AppError::Invalid(format!("{} is not a UTF-8 path", abs.display()))
+                })?;
+                RouteBackend::Static {
+                    source: source.to_owned(),
+                    spa: req.spa,
+                }
+            }
+            (None, Some(to)) => {
+                if req.spa {
+                    return Err(AppError::Invalid("--spa needs --static <folder>".into()));
+                }
+                RouteBackend::Address {
+                    url: parse_upstream_url(&to).map_err(AppError::Invalid)?,
+                }
+            }
+            (None, None) => unreachable!("checked by route_add"),
+        };
+        let host = parse_host(req.host.as_deref().ok_or_else(|| {
+            AppError::Invalid(format!("a {} route needs --host <domain>", backend.kind()))
+        })?)?;
+        let path = req
+            .path
+            .as_deref()
+            .map(parse_route_path)
+            .transpose()
+            .map_err(AppError::Invalid)?
+            .flatten();
+        if req.keep_prefix && path.is_none() {
+            return Err(AppError::Invalid("--keep-prefix needs --path".into()));
+        }
+        let tls = req.tls.unwrap_or(self.config()?.edge.default_tls);
+        self.check_host_free(&wl, &host, Some(tls)).await?;
+        let new = NewRoute {
+            service: "",
+            port: 0,
+            host: &host,
+            path: path.as_deref(),
+            tls,
+            upstream_port: 0,
+            origin: RouteOrigin::Manual,
+            backend: &backend,
+            snippet: None,
+            keep_prefix: req.keep_prefix,
+        };
+        self.insert_manual_route(&wl, new).await
+    }
+
+    /// Inserts a manual route; it replaces the automatic one for the same host and path.
+    async fn insert_manual_route(&self, wl: &Workload, new: NewRoute<'_>) -> Result<Route> {
+        let path = new.path.map(str::to_owned);
         let existing = self.store.edge().routes(wl.id).await?;
         if existing
             .iter()
-            .any(|r| r.origin == RouteOrigin::Auto && r.host == host && r.path == path)
+            .any(|r| r.origin == RouteOrigin::Auto && r.host == new.host && r.path == path)
         {
             self.store
                 .edge()
-                .delete_route(wl.id, &host, path.as_deref())
+                .delete_route(wl.id, new.host, path.as_deref())
                 .await?;
         }
-        let route = self.store.edge().insert_route(wl.id, new).await?;
-        self.share_port_claims(&wl.target).await;
-        Ok(route)
+        Ok(self.store.edge().insert_route(wl.id, new).await?)
+    }
+
+    /// Sets extra proxy directives for a route (`host` or `host/path`), written into its
+    /// block as they are; `None` removes them. Takes effect on the next apply.
+    pub async fn route_set_snippet(
+        &self,
+        workload: &str,
+        key: &str,
+        snippet: Option<&str>,
+    ) -> Result<Route> {
+        let wl = self.workload_get(workload).await?;
+        let route = self.find_route(&wl, key).await?;
+        let snippet = snippet
+            .map(check_snippet)
+            .transpose()
+            .map_err(AppError::Invalid)?;
+        self.store
+            .edge()
+            .set_route_snippet(
+                wl.id,
+                &route.host,
+                route.path.as_deref(),
+                snippet.as_deref(),
+            )
+            .await?;
+        self.find_route(&wl, key).await
+    }
+
+    async fn find_route(&self, wl: &Workload, key: &str) -> Result<Route> {
+        self.store
+            .edge()
+            .routes(wl.id)
+            .await?
+            .into_iter()
+            .find(|r| r.key() == key.trim_end_matches('/'))
+            .ok_or_else(|| AppError::NotFound(format!("route {key} in {}", wl.name)))
     }
 
     /// Removes a route by `host` or `host/path`. An automatic route is not added back.
     pub async fn route_remove(&self, workload: &str, key: &str) -> Result<Route> {
         let wl = self.workload_get(workload).await?;
-        let routes = self.store.edge().routes(wl.id).await?;
-        let route = routes
-            .into_iter()
-            .find(|r| r.key() == key.trim_end_matches('/'))
-            .ok_or_else(|| AppError::NotFound(format!("route {key} in {workload}")))?;
+        let route = self.find_route(&wl, key).await?;
         self.store
             .edge()
             .delete_route(wl.id, &route.host, route.path.as_deref())
@@ -293,6 +417,9 @@ impl App {
                 tls,
                 upstream_port,
                 origin: RouteOrigin::Auto,
+                backend: &RouteBackend::Service,
+                snippet: None,
+                keep_prefix: false,
             };
             match self.store.edge().insert_route(wl.id, new).await {
                 Ok(_) => changed = true,
@@ -334,9 +461,27 @@ impl App {
         let wl = self.workload_get(workload).await?;
         let mut urls: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for r in self.store.edge().routes(wl.id).await? {
-            urls.entry(r.service.clone()).or_default().push(r.url());
+            if r.is_service() {
+                urls.entry(r.service.clone()).or_default().push(r.url());
+            }
         }
         Ok(urls)
+    }
+
+    /// The domains the workload's routes answer on, sorted.
+    pub(crate) async fn route_hosts(&self, workload: &str) -> Result<Vec<String>> {
+        let wl = self.workload_get(workload).await?;
+        let mut hosts: Vec<String> = self
+            .store
+            .edge()
+            .routes(wl.id)
+            .await?
+            .into_iter()
+            .map(|r| r.host)
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        Ok(hosts)
     }
 
     /// The loopback publishes routes need, per service.
@@ -346,6 +491,9 @@ impl App {
     ) -> Result<BTreeMap<String, Vec<PublishedPort>>> {
         let mut out: BTreeMap<String, Vec<PublishedPort>> = BTreeMap::new();
         for r in self.store.edge().routes(wl.id).await? {
+            if !r.is_service() {
+                continue;
+            }
             let ports = out.entry(r.service.clone()).or_default();
             if !ports.iter().any(|p| p.host == r.upstream_port) {
                 ports.push(PublishedPort {
@@ -476,6 +624,17 @@ impl App {
             ))
         })
     }
+}
+
+/// A lowercase domain name; wildcards are refused.
+fn parse_host(host: &str) -> Result<String> {
+    let h = host.to_ascii_lowercase();
+    if !is_hostname(&h) {
+        return Err(AppError::Invalid(format!(
+            "`{h}` is not a domain name (wildcards are not supported)"
+        )));
+    }
+    Ok(h)
 }
 
 /// The container port a route goes to: a number, a registry port name, or by default the

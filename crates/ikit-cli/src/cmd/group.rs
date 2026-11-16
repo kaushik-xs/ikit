@@ -384,8 +384,25 @@ fn collect_env(
             env.insert(var.name.clone(), v);
             continue;
         }
-        if !ctx.interactive || !var.needs_value() {
+        if !var.needs_value() {
             continue;
+        }
+        if !ctx.interactive {
+            if var.secret {
+                bail!(
+                    "{}.{} is a required secret; set {} or run interactively",
+                    p.name,
+                    var.name,
+                    secret_env_name(&p.name, &var.name)
+                );
+            }
+            bail!(
+                "{}.{} is required; pass --set {}.{}=VALUE or run interactively",
+                p.name,
+                var.name,
+                p.name,
+                var.name
+            );
         }
         let label = format!("{}.{}:", p.name, var.name);
         let help = var

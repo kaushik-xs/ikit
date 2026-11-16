@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM workload_links WHERE consumer_id = ? AND provider_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a6c2e2e06641a807c8b7279d4a7dea945d994fe081cfcabdc2993bf955176739"
+}

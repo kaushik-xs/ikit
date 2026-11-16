@@ -32,6 +32,10 @@ pub enum ServiceCmd {
         secrets: Vec<String>,
         #[arg(long = "unset", value_name = "KEY")]
         unset: Vec<String>,
+        /// Generate (or regenerate) a secret the registry marks `generate:` (repeatable).
+        /// Services that read it pick the new value up on their next apply.
+        #[arg(long = "generate", value_name = "KEY")]
+        generate: Vec<String>,
     },
     /// Publish container ports on the target's host, or stop publishing them. Takes effect
     /// on the next `ikit apply`.
@@ -134,6 +138,7 @@ pub async fn run(ctx: &Ctx, cmd: ServiceCmd) -> anyhow::Result<()> {
             values,
             secrets,
             unset,
+            generate,
         } => {
             let mut set = BTreeMap::new();
             for v in &values {
@@ -159,7 +164,9 @@ pub async fn run(ctx: &Ctx, cmd: ServiceCmd) -> anyhow::Result<()> {
                 };
                 set.insert(k.clone(), value);
             }
-            let svc = app.service_set_env(&wl, &name, set, &unset).await?;
+            let svc = app
+                .service_set_env_generating(&wl, &name, set, &unset, &generate)
+                .await?;
             if ctx.output == Output::Json {
                 return print_json(&svc);
             }

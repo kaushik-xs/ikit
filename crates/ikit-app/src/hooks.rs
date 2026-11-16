@@ -200,9 +200,10 @@ impl App {
                 source,
                 via,
             } => {
-                if req.phase != HookPhase::PostApply {
+                if !matches!(req.phase, HookPhase::PostApply | HookPhase::PostData) {
                     return Err(AppError::Invalid(
-                        "SQL hooks run post-apply only (the database must be up)".to_owned(),
+                        "SQL hooks run post-data or post-apply only (the database must be up)"
+                            .to_owned(),
                     ));
                 }
                 let svc = find_service(&service)?;

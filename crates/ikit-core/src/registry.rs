@@ -55,6 +55,9 @@ pub struct ServiceSpec {
     /// Containers to run for each instance (compose `deploy.replicas`); unset means one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
+    /// Size of `/dev/shm` (compose `shm_size`), e.g. `2gb` for headless Chrome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shm_size: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,12 +100,29 @@ pub struct EnvVar {
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// A secret ikit generates when the service is added (or upgraded to a version that
+    /// declares it) and keeps in the org's secret store, so nobody pastes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<Generate>,
+}
+
+string_enum! {
+    "generated secret kind",
+    /// How a generated secret looks.
+    pub enum Generate {
+        /// 32 letters and digits: safe in URLs, shells and connection strings.
+        Password => "password",
+        /// 32 random bytes as 64 hex digits.
+        Hex32 => "hex32",
+        /// 32 random bytes in standard base64.
+        Base64_32 => "base64-32",
+    }
 }
 
 impl EnvVar {
     /// Whether a value has to be supplied when the service is added to a workload.
     pub fn needs_value(&self) -> bool {
-        self.required && self.default.is_none() && self.from.is_none()
+        self.required && self.default.is_none() && self.from.is_none() && self.generate.is_none()
     }
 }
 
@@ -154,6 +174,45 @@ impl ServiceSpec {
             if !names.insert(&e.name) {
                 return Err(format!("env var `{}` is declared twice", e.name));
             }
+            if let Some(g) = e.generate {
+                if !e.secret {
+                    return Err(format!(
+                        "env var `{}` generates a {g}, so it must be secret",
+                        e.name
+                    ));
+                }
+                if e.from.is_some() {
+                    return Err(format!(
+                        "env var `{}` cannot both generate and use `from`",
+                        e.name
+                    ));
+                }
+            }
+            if let Some(body) = e.from.as_deref().and_then(crate::template::template_body) {
+                for r in crate::template::template_refs(body)
+                    .map_err(|m| format!("env var `{}`: {m}", e.name))?
+                {
+                    if let Some(var) = crate::template::own_env_ref(r) {
+                        if var == e.name {
+                            return Err(format!("env var `{}` reads itself", e.name));
+                        }
+                        if self.env_var(var).is_none() {
+                            return Err(format!(
+                                "env var `{}` reads env.{var}, which the spec does not declare",
+                                e.name
+                            ));
+                        }
+                    } else if !crate::template::CONTEXT_REFS.contains(&r)
+                        && !r.starts_with("service:")
+                        && !r.starts_with("resource:")
+                    {
+                        return Err(format!(
+                            "env var `{}`: unknown placeholder `{{{{{r}}}}}` (use service:…, resource:…, env.<VAR>, org, workload, env or service)",
+                            e.name
+                        ));
+                    }
+                }
+            }
             if e.secret && e.default.is_some() {
                 return Err(format!("secret env var `{}` cannot have a default", e.name));
             }
@@ -180,8 +239,17 @@ impl ServiceSpec {
                 return Err(format!("resource `{}` is declared twice", n.name));
             }
         }
-        for e in &self.env {
-            let Some(reference) = e.from.as_deref().and_then(parse_reference) else {
+        for (e, reference) in self.env.iter().flat_map(|e| {
+            let refs: Vec<&str> = match e.from.as_deref() {
+                Some(f) => match crate::template::template_body(f) {
+                    Some(body) => crate::template::template_refs(body).unwrap_or_default(),
+                    None => vec![f],
+                },
+                None => vec![],
+            };
+            refs.into_iter().map(move |r| (e, r))
+        }) {
+            let Some(reference) = parse_reference(reference) else {
                 continue;
             };
             let (name, field) = reference.map_err(|m| format!("env var `{}`: {m}", e.name))?;
@@ -327,6 +395,8 @@ pub struct VersionDef {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shm_size: Option<String>,
 }
 
 impl VersionDef {
@@ -341,6 +411,7 @@ impl VersionDef {
             needs,
             command,
             replicas,
+            shm_size,
         } = spec;
         Self {
             version,
@@ -357,6 +428,7 @@ impl VersionDef {
             needs,
             command,
             replicas,
+            shm_size,
         }
     }
 
@@ -371,6 +443,7 @@ impl VersionDef {
             needs: self.needs.clone(),
             command: self.command.clone(),
             replicas: self.replicas,
+            shm_size: self.shm_size.clone(),
         }
     }
 }
@@ -538,6 +611,34 @@ pub enum RegistryError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_secrets_and_templates_validate() {
+        let ok: ServiceSpec = serde_yaml_ng::from_str(
+            "env:\n- {name: DB_PASSWORD, secret: true, generate: password}\n- {name: DB_USER, default: app}\n- {name: URL, secret: true, from: 'template:pg://{{env.DB_USER}}:{{env.DB_PASSWORD}}@{{service:postgres.host}}/{{workload}}'}\nshm_size: 2gb\n",
+        )
+        .unwrap();
+        ok.validate().unwrap();
+        assert!(!ok.env[0].needs_value());
+
+        let bad = |yaml: &str| {
+            serde_yaml_ng::from_str::<ServiceSpec>(yaml)
+                .unwrap()
+                .validate()
+                .unwrap_err()
+        };
+        assert!(bad("env:\n- {name: K, generate: hex32}\n").contains("must be secret"));
+        assert!(
+            bad("env:\n- {name: U, from: 'template:{{env.NOPE}}'}\n").contains("does not declare")
+        );
+        assert!(
+            bad("env:\n- {name: U, from: 'template:{{nope}}'}\n").contains("unknown placeholder")
+        );
+        assert!(
+            bad("env:\n- {name: U, from: 'template:{{resource:jobs.url}}'}\n")
+                .contains("not in `needs`")
+        );
+    }
+
     #[test]
     fn command_and_replicas_round_trip_and_validate() {
         let spec: ServiceSpec =

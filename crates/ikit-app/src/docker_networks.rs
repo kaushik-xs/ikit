@@ -101,7 +101,7 @@ impl App {
     }
 
     /// The names of the Docker networks on the target.
-    async fn docker_network_names(&self, place: &Place) -> Result<Vec<String>> {
+    pub(crate) async fn docker_network_names(&self, place: &Place) -> Result<Vec<String>> {
         let out = match place {
             Place::Local(_) => {
                 let args = ["network", "ls", "--format", "{{.Name}}"].map(str::to_owned);

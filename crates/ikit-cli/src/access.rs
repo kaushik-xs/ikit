@@ -104,8 +104,12 @@ impl Command {
                 WorkloadCmd::List { .. }
                 | WorkloadCmd::Show { .. }
                 | WorkloadCmd::Runs { .. }
-                | WorkloadCmd::Use { .. } => Read,
-                WorkloadCmd::Create { .. } | WorkloadCmd::Rm { .. } => Write,
+                | WorkloadCmd::Use { .. }
+                | WorkloadCmd::Links { .. } => Read,
+                WorkloadCmd::Create { .. }
+                | WorkloadCmd::Rm { .. }
+                | WorkloadCmd::Link { .. }
+                | WorkloadCmd::Unlink { .. } => Write,
             },
             Command::Group(c) => match c {
                 GroupCmd::List => Read,
@@ -170,8 +174,9 @@ impl Command {
                 NetCmd::Docker(DockerCmd::Attach { .. } | DockerCmd::Detach { .. }) => Write,
             },
             Command::Route(c) => match c {
-                RouteCmd::List => Read,
+                RouteCmd::List | RouteCmd::Snippet { show: true, .. } => Read,
                 RouteCmd::Add { .. }
+                | RouteCmd::Snippet { .. }
                 | RouteCmd::Rm { .. }
                 | RouteCmd::Redirect { .. }
                 | RouteCmd::Unredirect { .. }

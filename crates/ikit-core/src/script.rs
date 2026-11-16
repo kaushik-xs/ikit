@@ -162,8 +162,11 @@ impl TargetField {
 pub enum ServiceField {
     /// The container's name, `<workload>-<service>-1`.
     Container,
-    /// The service's DNS name inside the workload's networks.
+    /// The service's DNS name inside the workload's networks; `<workload>-<service>` for a
+    /// service of a linked workload.
     Host,
+    /// `http://<host>:<first registry port>`.
+    InternalUrl,
     Image,
     Version,
     /// A value of the service's env: registry default, instance value or keychain secret.
@@ -212,6 +215,7 @@ impl fmt::Display for SourcePath {
                 match field {
                     ServiceField::Container => f.write_str("container"),
                     ServiceField::Host => f.write_str("host"),
+                    ServiceField::InternalUrl => f.write_str("internal_url"),
                     ServiceField::Image => f.write_str("image"),
                     ServiceField::Version => f.write_str("version"),
                     ServiceField::Env(v) => write!(f, "env.{v}"),
@@ -248,10 +252,16 @@ impl FromStr for SourcePath {
                     .map(|(t, _)| *t)
                     .ok_or_else(bad)?,
             ),
-            ["service", name, rest @ ..] if crate::is_slug(name) => {
+            ["service", name, rest @ ..]
+                if crate::is_slug(name)
+                    || name
+                        .split_once('/')
+                        .is_some_and(|(w, n)| crate::is_slug(w) && crate::is_slug(n)) =>
+            {
                 let field = match rest {
                     ["container"] => ServiceField::Container,
                     ["host"] => ServiceField::Host,
+                    ["internal_url"] => ServiceField::InternalUrl,
                     ["image"] => ServiceField::Image,
                     ["version"] => ServiceField::Version,
                     ["env", var] if is_env_name(var) => ServiceField::Env((*var).to_owned()),
@@ -464,9 +474,18 @@ mod tests {
             "service.postgres.env.POSTGRES_PASSWORD",
             "from.service.pg-main.port.5432",
             "service.core.version",
+            "service.decision-hub.internal_url",
+            "service.wl-regere-dev-002/decision-hub.host",
         ] {
             let p: SourcePath = s.parse().unwrap();
             assert_eq!(p.to_string(), s);
+        }
+        for bad in [
+            "service./x.host",
+            "service.a/b/c.host",
+            "service.Bad/x.host",
+        ] {
+            assert!(bad.parse::<SourcePath>().is_err(), "{bad}");
         }
         let to: SourcePath = "to.target.ssh".parse().unwrap();
         assert_eq!(to, "target.ssh".parse().unwrap());

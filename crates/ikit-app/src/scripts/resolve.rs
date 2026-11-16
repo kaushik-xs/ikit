@@ -21,14 +21,47 @@ pub(crate) struct WlCtx {
     /// The compose project folder on the target; `None` for targets ikit cannot deploy to.
     pub dir: Option<String>,
     pub services: Vec<ServiceInstance>,
+    /// The workloads this one links to, with their services.
+    pub linked: Vec<(String, Vec<ServiceInstance>)>,
 }
 
 impl WlCtx {
-    fn service(&self, name: &str) -> Result<&ServiceInstance> {
-        self.services
+    /// `name` in this workload, else in exactly one linked workload (`<workload>/<name>`
+    /// picks one). Returns the linked workload's name for a linked service.
+    fn service(&self, name: &str) -> Result<(&ServiceInstance, Option<&str>)> {
+        if let Some((wl, svc)) = name.split_once('/') {
+            let (wl, services) = self.linked.iter().find(|(w, _)| w == wl).ok_or_else(|| {
+                AppError::NotFound(format!("{wl} is not linked to {}", self.wl.name))
+            })?;
+            let s = services
+                .iter()
+                .find(|s| s.name == svc)
+                .ok_or_else(|| AppError::NotFound(format!("service `{svc}` in {wl}")))?;
+            return Ok((s, Some(wl.as_str())));
+        }
+        if let Some(s) = self.services.iter().find(|s| s.name == name) {
+            return Ok((s, None));
+        }
+        let hits: Vec<(&ServiceInstance, &str)> = self
+            .linked
             .iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| AppError::NotFound(format!("service `{name}` in {}", self.wl.name)))
+            .filter_map(|(w, services)| {
+                services
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| (s, w.as_str()))
+            })
+            .collect();
+        match hits.as_slice() {
+            [(s, w)] => Ok((s, Some(w))),
+            [] => Err(AppError::NotFound(format!(
+                "service `{name}` in {}",
+                self.wl.name
+            ))),
+            _ => Err(AppError::Invalid(format!(
+                "service `{name}` runs in several linked workloads; use service.<workload>/{name}"
+            ))),
+        }
     }
 
     fn not_ssh(&self) -> AppError {
@@ -141,11 +174,17 @@ impl App {
             Err(_) => None,
         };
         let services = self.services_list(&wl.name).await?;
+        let mut linked = Vec::new();
+        for p in self.store.networks().providers_of(wl.id).await? {
+            let services = self.services_list(&p).await?;
+            linked.push((p, services));
+        }
         Ok(WlCtx {
             wl,
             target,
             dir,
             services,
+            linked,
         })
     }
 
@@ -196,10 +235,25 @@ impl App {
                 }
             }
             Field::Service { name, field } => {
-                let svc = side.service(name)?;
+                let (svc, linked) = side.service(name)?;
+                let wl_name = linked.unwrap_or(&side.wl.name).to_owned();
+                let host = match linked {
+                    Some(w) => format!("{w}-{}", svc.name),
+                    None => svc.name.clone(),
+                };
                 match field {
-                    ServiceField::Container => plain(format!("{}-{}-1", side.wl.name, svc.name)),
-                    ServiceField::Host => plain(svc.name.clone()),
+                    ServiceField::Container => plain(format!("{wl_name}-{}-1", svc.name)),
+                    ServiceField::Host => plain(host),
+                    ServiceField::InternalUrl => {
+                        let (_, version) = self.service_show(&wl_name, &svc.name).await?;
+                        match version.spec.ports.first() {
+                            Some(p) => plain(format!("http://{host}:{}", p.container)),
+                            None => Err(AppError::Invalid(format!(
+                                "service `{}` exposes no ports",
+                                svc.name
+                            ))),
+                        }
+                    }
                     ServiceField::Image => plain(svc.image.clone()),
                     ServiceField::Version => plain(svc.version.to_string()),
                     ServiceField::Port(p) => Ok(svc
@@ -208,9 +262,9 @@ impl App {
                         .find(|x| x.container == *p && !x.udp)
                         .map(|x| (x.host.to_string(), false))),
                     ServiceField::Env(var) => {
-                        let key = (path.side == Side::From, svc.name.clone());
+                        let key = (path.side == Side::From, format!("{wl_name}/{}", svc.name));
                         if !cache.contains_key(&key) {
-                            let env = self.service_env(&side.wl.name, &svc.name).await?;
+                            let env = self.service_env(&wl_name, &svc.name).await?;
                             cache.insert(key.clone(), env);
                         }
                         let secret = svc.secret_env.contains(var);

@@ -254,7 +254,7 @@ impl App {
                 own.extend(
                     routes
                         .iter()
-                        .filter(|(w, _)| *w == wl.name)
+                        .filter(|(w, r)| *w == wl.name && r.is_service())
                         .map(|(_, r)| loopback(r.upstream_port, r.port)),
                 );
                 continue;
@@ -271,7 +271,10 @@ impl App {
                     },
                 }));
             }
-            for (_, r) in routes.iter().filter(|(w, _)| *w == wl.name) {
+            for (_, r) in routes
+                .iter()
+                .filter(|(w, r)| *w == wl.name && r.is_service())
+            {
                 claims.push(Claim {
                     port: loopback(r.upstream_port, r.port),
                     owner: Owner::Route {
@@ -289,13 +292,20 @@ impl App {
                 if header.org == self.org.name {
                     continue;
                 }
-                claims.extend(header.routes.iter().map(|r| Claim {
-                    port: loopback(r.upstream, r.upstream),
-                    owner: Owner::Site {
-                        org: header.org.clone(),
-                        workload: header.workload.clone(),
-                    },
-                }));
+                // Static and address routes have no upstream port (0).
+                claims.extend(
+                    header
+                        .routes
+                        .iter()
+                        .filter(|r| r.upstream != 0)
+                        .map(|r| Claim {
+                            port: loopback(r.upstream, r.upstream),
+                            owner: Owner::Site {
+                                org: header.org.clone(),
+                                workload: header.workload.clone(),
+                            },
+                        }),
+                );
             }
         }
         let policy = self.config()?.ports;
@@ -437,6 +447,7 @@ impl App {
         mine.extend(
             routes
                 .iter()
+                .filter(|r| r.is_service())
                 .map(|r| (r.service.clone(), loopback(r.upstream_port, r.port))),
         );
         if mine.is_empty() {
@@ -517,7 +528,7 @@ impl App {
             ports.extend(
                 routes
                     .iter()
-                    .filter(|(w, _)| *w == wl.name)
+                    .filter(|(w, r)| *w == wl.name && r.is_service())
                     .map(|(_, r)| ClaimedPort {
                         workload: wl.name.clone(),
                         service: r.service.clone(),

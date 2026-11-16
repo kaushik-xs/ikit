@@ -9,8 +9,8 @@ use ikit_core::{EdgeKind, HostManifest};
 use serde::Serialize;
 
 use super::{
-    EDGE_DIR, HOST_FILE, PLACEHOLDER_SITE, SITES_DIR, SiteHeader, base_config, include_line,
-    parse_site_header, server, validate_cmd, version_cmd,
+    EDGE_DIR, HOST_FILE, PLACEHOLDER_SITE, SITES_DIR, SiteHeader, WWW_DIR, base_config,
+    include_line, parse_site_header, server, validate_cmd, version_cmd,
 };
 
 /// How packages are installed on the host.
@@ -436,6 +436,57 @@ mv {path}.ikit-new {path}
     s
 }
 
+/// Unpacks a tar of a static route's files read from stdin into its folder for `hash`,
+/// readable by everyone (the proxy runs as its own user). An upload that is already there
+/// is kept as it is.
+pub fn upload_static_script(org: &str, workload: &str, route_key: &str, hash: &str) -> String {
+    let root = super::static_root(org, workload, route_key, hash);
+    let dir = root.rsplit_once('/').map_or(root.as_str(), |(d, _)| d);
+    let mut s = prelude();
+    s.push_str(&format!(
+        r#"if [ -d {root} ]; then cat >/dev/null; exit 0; fi
+mkdir -p {dir}
+chmod 755 {WWW_DIR} {WWW_DIR}/{org} {WWW_DIR}/{org}/{workload} {dir}
+rm -rf {dir}/.ikit-new
+mkdir {dir}/.ikit-new
+tar -x -o -f - -C {dir}/.ikit-new
+chmod -R u=rwX,go=rX {dir}/.ikit-new
+mv {dir}/.ikit-new {root}
+"#
+    ));
+    s
+}
+
+/// Removes the workload's static files except the uploads in `keep` (route key, hash):
+/// older uploads, and every folder of a route that is gone. An empty `keep` removes all.
+pub fn prune_static_script(org: &str, workload: &str, keep: &[(&str, &str)]) -> String {
+    let base = format!("{WWW_DIR}/{org}/{workload}");
+    let mut cases = String::new();
+    for (key, hash) in keep {
+        cases.push_str(&format!(
+            "    {}) keep={hash} ;;\n",
+            super::static_route_dir(key)
+        ));
+    }
+    let mut s = prelude();
+    s.push_str(&format!(
+        r#"[ -d {base} ] || exit 0
+for d in {base}/*/; do
+  [ -d "$d" ] || continue
+  case "$(basename "$d")" in
+{cases}    *) rm -rf "$d"; continue ;;
+  esac
+  for r in "$d"*/ "$d".ikit-new; do
+    [ -e "$r" ] || continue
+    [ "$(basename "$r")" = "$keep" ] || rm -rf "$r"
+  done
+done
+rmdir {base} 2>/dev/null || true
+"#
+    ));
+    s
+}
+
 /// Checks the config and reloads the proxy (starting it if it is stopped).
 pub fn reload_script(kind: EdgeKind) -> String {
     let mut s = prelude();
@@ -697,6 +748,13 @@ listen=[::]:443 users:(("nginx",pid=11,fd=7))
             ));
             scripts.push(remove_site_script(*kind, "acme__w.conf"));
             scripts.push(reload_script(*kind));
+            scripts.push(upload_static_script("acme", "w", "acme.com/docs", "abc"));
+            scripts.push(prune_static_script(
+                "acme",
+                "w",
+                &[("acme.com/docs", "abc"), ("acme.com", "def")],
+            ));
+            scripts.push(prune_static_script("acme", "w", &[]));
             for family in [PkgFamily::Apt, PkgFamily::Dnf] {
                 scripts.push(install_script(*kind, family, None, &m));
                 scripts.push(upgrade_script(*kind, family, Some("1.2.3")));

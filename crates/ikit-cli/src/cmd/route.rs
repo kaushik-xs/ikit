@@ -11,11 +11,12 @@ use crate::output::{Output, print_json, table};
 
 #[derive(Debug, Subcommand)]
 pub enum RouteCmd {
-    /// Route a domain (and optional path prefix) to a service through the target's reverse
-    /// proxy, with a certificate from ACME. The port is published on the host's loopback
-    /// address only. Takes effect on the next apply.
+    /// Route a domain (and optional path prefix) through the target's reverse proxy, with a
+    /// certificate from ACME, to a service (its port is published on the host's loopback
+    /// address only), to a folder of static files the proxy serves itself (`--static`), or
+    /// to an address such as a process on the host (`--to`). Takes effect on the next apply.
     Add {
-        /// Service instance (default: asked).
+        /// Service instance (default: asked, unless --static or --to is given).
         service: Option<String>,
         /// Domain (default: the org's host template under `edge.base_domain`).
         #[arg(long)]
@@ -29,6 +30,36 @@ pub enum RouteCmd {
         /// acme (public certificate), internal (the proxy's own CA) or off (plain HTTP).
         #[arg(long)]
         tls: Option<TlsMode>,
+        /// Serve the files of this local folder (e.g. a build's dist/). Each apply copies
+        /// changed files to the host. Needs --host.
+        #[arg(long = "static", value_name = "FOLDER", conflicts_with_all = ["service", "port", "to"])]
+        static_dir: Option<std::path::PathBuf>,
+        /// With --static: answer requests for missing files with index.html (single-page apps).
+        #[arg(long, requires = "static_dir")]
+        spa: bool,
+        /// Proxy to an address instead of a service: a port on the host (3000), host:port or
+        /// http(s)://host:port. Needs --host.
+        #[arg(long, value_name = "ADDRESS", conflicts_with_all = ["service", "port"])]
+        to: Option<String>,
+        /// With --path: pass the prefix on instead of stripping it, for apps served under a
+        /// base path (e.g. a Next.js basePath of /ui/app1). Caddy only.
+        #[arg(long, requires = "path")]
+        keep_prefix: bool,
+    },
+    /// Add extra proxy directives to a route (`host` or `host/path`), written into its
+    /// Caddyfile or ferron.conf block as they are: headers, auth, rate limits, timeouts. The
+    /// proxy checks them on apply and keeps the previous site if they are invalid.
+    Snippet {
+        route: String,
+        /// File with the directives (`-` reads stdin).
+        #[arg(long, value_name = "FILE", conflicts_with = "clear", required_unless_present_any = ["clear", "show"])]
+        file: Option<std::path::PathBuf>,
+        /// Remove the route's snippet.
+        #[arg(long)]
+        clear: bool,
+        /// Print the route's snippet.
+        #[arg(long, conflicts_with_all = ["file", "clear"])]
+        show: bool,
     },
     /// List the workload's routes and redirects.
     #[command(alias = "ls")]
@@ -76,9 +107,15 @@ pub async fn run(ctx: &Ctx, cmd: RouteCmd) -> anyhow::Result<()> {
             path,
             port,
             tls,
+            static_dir,
+            spa,
+            to,
+            keep_prefix,
         } => {
+            let other = static_dir.is_some() || to.is_some();
             let service = match service {
                 Some(s) => s,
+                None if other => String::new(),
                 None => pick_service(ctx, &app, &wl).await?,
             };
             let route = app
@@ -90,19 +127,76 @@ pub async fn run(ctx: &Ctx, cmd: RouteCmd) -> anyhow::Result<()> {
                         host,
                         path,
                         tls,
+                        static_dir,
+                        spa,
+                        to,
+                        keep_prefix,
                     },
                 )
                 .await?;
             if ctx.output == Output::Json {
                 return print_json(&route);
             }
+            let via = if route.is_service() {
+                format!(" (loopback port {})", route.upstream_port)
+            } else {
+                String::new()
+            };
             println!(
-                "Routed {} to {}:{} (loopback port {}). Run `ikit apply` to put it live.",
+                "Routed {} to {}{via}. Run `ikit apply` to put it live.",
                 route.url(),
-                route.service,
-                route.port,
-                route.upstream_port
+                route.target(),
             );
+        }
+        RouteCmd::Snippet {
+            route,
+            file,
+            clear,
+            show,
+        } => {
+            if show {
+                let list = app.route_list(&wl).await?;
+                let r = list
+                    .routes
+                    .iter()
+                    .find(|r| r.key() == route.trim_end_matches('/'))
+                    .ok_or_else(|| anyhow::anyhow!("no route {route} in {wl}"))?;
+                if ctx.output == Output::Json {
+                    return print_json(&r.snippet);
+                }
+                match &r.snippet {
+                    Some(s) => println!("{s}"),
+                    None => println!("{} has no snippet.", r.key()),
+                }
+                return Ok(());
+            }
+            let text = match (&file, clear) {
+                (_, true) => None,
+                (Some(f), _) if f.as_os_str() == "-" => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    Some(buf)
+                }
+                (Some(f), _) => Some(
+                    std::fs::read_to_string(f)
+                        .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()))?,
+                ),
+                (None, false) => bail!("pass --file <FILE>, --clear or --show"),
+            };
+            let r = app.route_set_snippet(&wl, &route, text.as_deref()).await?;
+            if ctx.output == Output::Json {
+                return print_json(&r);
+            }
+            match r.snippet {
+                Some(_) => println!(
+                    "Set the snippet of {}. Run `ikit plan` to check it and `ikit apply` to put it live.",
+                    r.key()
+                ),
+                None => println!(
+                    "Removed the snippet of {}; it goes on the next apply.",
+                    r.key()
+                ),
+            }
         }
         RouteCmd::List => print_list(ctx, &app.route_list(&wl).await?)?,
         RouteCmd::Rm { route } => {
@@ -182,15 +276,19 @@ fn print_list(ctx: &Ctx, list: &RouteList) -> anyhow::Result<()> {
         return Ok(());
     }
     if !list.routes.is_empty() {
-        let mut t = table(&["URL", "SERVICE", "PORT", "UPSTREAM", "TLS", "ORIGIN"]);
+        let mut t = table(&["URL", "TO", "UPSTREAM", "TLS", "ORIGIN", "SNIPPET"]);
         for r in &list.routes {
             t.add_row(vec![
                 r.url(),
-                r.service.clone(),
-                r.port.to_string(),
-                format!("127.0.0.1:{}", r.upstream_port),
+                r.target(),
+                if r.is_service() {
+                    format!("127.0.0.1:{}", r.upstream_port)
+                } else {
+                    "-".into()
+                },
                 r.tls.to_string(),
                 r.origin.to_string(),
+                if r.snippet.is_some() { "yes" } else { "" }.into(),
             ]);
         }
         println!("{t}");

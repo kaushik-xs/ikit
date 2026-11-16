@@ -8,7 +8,7 @@ passwords or CSV files of their own.
 
 Typical uses:
 
-- **Provisioning**: create a role and database per app service (`create-db.sh`).
+- **Provisioning**: create a role and database per app service (`create-service-dbs.sh`), as a `post-data` hook so they exist before the services start.
 - **Seeding**: seed tenants and admins once the stack is up (`init.sh`), as a `post-apply` hook.
 - **Operations across workloads**: dump production and restore it into dev
   (`export_cp_dump_from_prod_to_dev.sh`), with `--from` and `--to`.
@@ -147,10 +147,14 @@ params:
 | `target.ssh_args` | The options ikit passes to ssh, e.g. `-o BatchMode=yes -o ConnectTimeout=10 -p 2222`. Use it unquoted: `ssh $ARGS "$DEST"`. |
 | `target.dir` | The workload's compose project folder on the target. |
 | `service.<svc>.container` | `<workload>-<svc>-1`, the Compose container name. |
-| `service.<svc>.host` | `<svc>`, its DNS name inside the workload's networks. |
+| `service.<svc>.host` | `<svc>`, its DNS name inside the workload's networks; `<workload>-<svc>` for a service of a linked workload. |
+| `service.<svc>.internal_url` | `http://<host>:<first registry port>`. |
 | `service.<svc>.image`, `.version` | Its image and resolved version. |
 | `service.<svc>.env.<VAR>` | Its env value: registry default, instance value or keychain secret. `from:` references in the registry are not resolved, so read the underlying var. |
 | `service.<svc>.port.<port>` | The host port its container port is published on (unset if unpublished). |
+
+A `<svc>` the workload does not run is looked up in the workloads it links to (`ikit wl
+link`); `service.<workload>/<svc>.host` picks one when several do.
 
 Prefix any source except `org`, `phase` and `run_id` with `from.` to read the `--from`
 workload. `to.` and no prefix both mean the workload the script runs against. An unknown
@@ -256,7 +260,7 @@ ikit script rm NAME [-y]
 ```
 
 ```bash
-ikit hook add HOOK --script NAME [--param K=V|K=@source]... [--phase pre-apply|post-apply|pre-destroy]
+ikit hook add HOOK --script NAME [--param K=V|K=@source]... [--phase pre-apply|post-data|post-apply|pre-destroy]
 ```
 
 - **`--param`** on the command line takes a plain value, or `@source` to resolve one. It adds a

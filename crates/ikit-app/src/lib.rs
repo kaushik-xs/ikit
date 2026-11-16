@@ -19,6 +19,7 @@ pub mod exec;
 mod hooks;
 mod hooks_sql;
 mod init;
+mod links;
 mod mcp_config;
 mod mcp_tokens;
 mod org_secrets;
@@ -36,6 +37,7 @@ mod routes;
 mod scripts;
 pub mod secrets;
 mod services;
+mod static_files;
 mod storage;
 mod targets;
 mod workloads;
@@ -52,6 +54,7 @@ pub use edge::{
 pub use exec::{Exec, ExecOutput, SystemExec};
 pub use hooks::{HookOutcome, HookPlan, HookRequest, NewHookRequest};
 pub use init::{InitReport, OrgInit, init};
+pub use links::WorkloadLinks;
 pub use mcp_config::McpConfig;
 pub use mcp_tokens::{McpToken, mcp_token_verify};
 pub use org_secrets::{
