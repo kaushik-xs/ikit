@@ -18,7 +18,7 @@ env:
   SQLX_OFFLINE: "true"
   # Dependencies come before the crates that use them.
   CRATES: >-
-    ikit-core ikit-net ikit-provider ikit-state ikit-app ikit-mcp ikit-cli
+    ikit-core ikit-net ikit-provider ikit-state ikit-app ikit-mcp ikit-tui ikit-cli
 
 permissions:
   contents: read
