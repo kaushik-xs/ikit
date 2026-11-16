@@ -1,0 +1,13 @@
+[package]
+name = "ikit-tui"
+description = "ikit: a terminal UI over the ikit CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ratatui = "0.30"
+serde_json.workspace = true

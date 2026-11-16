@@ -19,6 +19,12 @@ targets) are still open.
 
 ## Usage
 
+`ikit tui` opens a terminal UI (ratatui) over the whole flow below: orgs, profiles, registry,
+targets, workloads, groups and services, plan/apply/destroy, routes, hooks, resources, runs,
+backups, storage, networks, scripts and MCP tokens. It runs these same commands underneath
+(`-o json` for lists), so locking, syncing and prompts behave exactly as on the command line;
+`:` runs any other `ikit` command from inside it.
+
 ```bash
 ikit init                                          # creates ~/.ikit; re-run after upgrading ikit
 ikit org create acme --display-name "Acme Corp"    # own state.db; registry seeded with postgres, redis, ...

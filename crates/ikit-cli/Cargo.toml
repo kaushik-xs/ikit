@@ -16,6 +16,7 @@ ikit-app.workspace = true
 ikit-provider.workspace = true
 ikit-mcp.workspace = true
 ikit-net.workspace = true
+ikit-tui.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 comfy-table.workspace = true

@@ -35,7 +35,8 @@ use Access::{Read, Write};
 impl Command {
     pub fn access(&self) -> Access {
         match self {
-            Command::Init | Command::Identity(_) => Access::None,
+            // The TUI runs other ikit commands, each with its own session.
+            Command::Init | Command::Identity(_) | Command::Tui => Access::None,
             Command::Org(c) => match c {
                 // The secrets file travels with the org's state.
                 OrgCmd::Secrets(s) => match s {
@@ -116,7 +117,7 @@ impl Command {
                 GroupCmd::Add { .. } | GroupCmd::Rm { .. } => Write,
             },
             Command::Service(c) => match c {
-                ServiceCmd::List | ServiceCmd::Show { .. } => Read,
+                ServiceCmd::List | ServiceCmd::Show { .. } | ServiceCmd::Secret(_) => Read,
                 ServiceCmd::Upgrade { .. }
                 | ServiceCmd::Set { .. }
                 | ServiceCmd::Publish { .. }

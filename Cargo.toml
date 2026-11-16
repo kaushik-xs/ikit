@@ -17,6 +17,7 @@ ikit-app = { path = "crates/ikit-app" }
 ikit-provider = { path = "crates/ikit-provider" }
 ikit-mcp = { path = "crates/ikit-mcp" }
 ikit-net = { path = "crates/ikit-net" }
+ikit-tui = { path = "crates/ikit-tui" }
 
 age = "0.11"
 anyhow = "1"
