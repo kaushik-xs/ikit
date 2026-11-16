@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.name AS \"script!\", r.workload, r.from_workload, r.hook, r.run_id,\n                      r.checksum, r.params_json, r.result, r.exit_code, r.error, r.output_tail,\n                      r.ran_at AS \"ran_at: DateTime<Utc>\"\n               FROM script_runs r JOIN scripts s ON s.id = r.script_id\n               WHERE (?1 IS NULL OR s.name = ?1)\n                 AND (?2 IS NULL OR r.workload = ?2 OR r.from_workload = ?2)\n               ORDER BY r.id DESC LIMIT ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "script!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "workload",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "from_workload",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "hook",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "checksum",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "params_json",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "result",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "exit_code",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "error",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "output_tail",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "ran_at: DateTime<Utc>",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "44d2c2da0dd98077cdbacc21ed0c39cf6778dc7505545e19d162d4e08fd3a7cc"
+}

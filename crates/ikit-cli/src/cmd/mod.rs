@@ -12,6 +12,7 @@ pub mod profile;
 pub mod registry;
 pub mod resource;
 pub mod route;
+pub mod script;
 pub mod service;
 pub mod storage;
 pub mod target;

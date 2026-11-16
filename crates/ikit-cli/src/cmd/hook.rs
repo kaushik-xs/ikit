@@ -13,8 +13,8 @@ use crate::output::{Output, print_json, table};
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum HookCmd {
-    /// Add a hook. Exactly one of --source (SQL scripts), --shell, --http or --mcp picks the
-    /// kind.
+    /// Add a hook. Exactly one of --source (SQL scripts), --shell, --http, --mcp or --script
+    /// picks the kind.
     ///
     /// SQL scripts run once each (tracked in the database's `_ikit_hook_ledger`); `R__*.sql`
     /// scripts re-run when they change. Shell, HTTP and MCP hooks run every time their phase
@@ -36,6 +36,13 @@ pub enum HookCmd {
         /// "npx -y @acme/mcp-server". Runs on this machine; needs --tool.
         #[arg(long, value_name = "COMMAND", group = "kind", requires = "tool")]
         mcp: Option<String>,
+        /// Script: a script from the org's library (`ikit script add`), run with its params
+        /// resolved against this workload.
+        #[arg(long, value_name = "NAME", group = "kind")]
+        script: Option<String>,
+        /// Script: override or add a param, `NAME=value` or `NAME=@source` (repeatable).
+        #[arg(long = "param", value_name = "NAME=VALUE", requires = "script")]
+        params: Vec<String>,
         /// MCP: the tool to call.
         #[arg(long)]
         tool: Option<String>,
@@ -131,6 +138,8 @@ pub async fn run(ctx: &Ctx, cmd: HookCmd) -> anyhow::Result<()> {
             shell,
             http,
             mcp,
+            script,
+            params,
             tool,
             args,
             secret_env,
@@ -198,8 +207,13 @@ pub async fn run(ctx: &Ctx, cmd: HookCmd) -> anyhow::Result<()> {
                     arguments,
                     secret_env: secrets,
                 }
+            } else if let Some(script) = script {
+                HookRequest::Script {
+                    script,
+                    params: super::script::parse_params(&params)?,
+                }
             } else {
-                bail!("pass one of --source (SQL), --shell, --http or --mcp");
+                bail!("pass one of --source (SQL), --shell, --http, --mcp or --script");
             };
             let fail_on_error = if warn_only {
                 Some(false)
@@ -237,7 +251,7 @@ pub async fn run(ctx: &Ctx, cmd: HookCmd) -> anyhow::Result<()> {
             }
             if hooks.is_empty() {
                 println!(
-                    "{wl} has no hooks. Add one with `ikit hook add <name> --source|--shell|--http ...`."
+                    "{wl} has no hooks. Add one with `ikit hook add <name> --source|--shell|--http|--mcp|--script ...`."
                 );
                 return Ok(());
             }

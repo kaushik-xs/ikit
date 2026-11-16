@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO scripts (name, description, interpreter, runs_on, body, checksum, spec_json,\n                                    source, created_at, updated_at)\n               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)\n               ON CONFLICT (name) DO UPDATE SET\n                   description = excluded.description, interpreter = excluded.interpreter,\n                   runs_on = excluded.runs_on, body = excluded.body, checksum = excluded.checksum,\n                   spec_json = excluded.spec_json, source = excluded.source,\n                   updated_at = excluded.updated_at\n               RETURNING id AS \"id!\", name, description, interpreter, runs_on, body, checksum,\n                         spec_json, source, created_at AS \"created_at: DateTime<Utc>\",\n                         updated_at AS \"updated_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "interpreter",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "runs_on",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "checksum",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "spec_json",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "31a1e6a692e99d2663168e2ad600373825a825b044ec4e97d4f6941b0a10e2a4"
+}

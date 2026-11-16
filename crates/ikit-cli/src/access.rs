@@ -14,6 +14,7 @@ use crate::cmd::profile::ProfileCmd;
 use crate::cmd::registry::RegistryCmd;
 use crate::cmd::resource::{BackendCmd, KeysCmd, ResourceCmd};
 use crate::cmd::route::RouteCmd;
+use crate::cmd::script::ScriptCmd;
 use crate::cmd::service::ServiceCmd;
 use crate::cmd::storage::StorageCmd;
 use crate::cmd::target::TargetCmd;
@@ -120,6 +121,15 @@ impl Command {
             Command::Hook(c) => match c {
                 HookCmd::List | HookCmd::History { .. } => Read,
                 HookCmd::Add { .. } | HookCmd::Rm { .. } | HookCmd::Run { .. } => Write,
+            },
+            Command::Script(c) => match c {
+                ScriptCmd::List
+                | ScriptCmd::Show { .. }
+                | ScriptCmd::Export { .. }
+                | ScriptCmd::History { .. }
+                | ScriptCmd::Run { dry_run: true, .. } => Read,
+                // A run is recorded (and locks its workload) like `hook run`.
+                ScriptCmd::Add { .. } | ScriptCmd::Rm { .. } | ScriptCmd::Run { .. } => Write,
             },
             Command::Storage(c) => match c {
                 StorageCmd::List

@@ -145,6 +145,64 @@ fn orgs_are_isolated() {
 }
 
 #[test]
+fn scripts_round_trip_and_run_locally() {
+    let ikit = Ikit::new("scr");
+    ikit.ok(&["target", "attach", "vm", "laptop", "--local"]);
+    ikit.ok(&["wl", "create", "--env", "dev", "--target", "laptop"]);
+    ikit.ok(&["sg", "add", "data", "--services", "redis@7"]);
+    let file = ikit.home.path().join("ping.sh");
+    let body = "#!/bin/sh\n# ikit:\n#   name: ping\n#   runs_on: target\n#   params:\n#     CTR: service.redis.container\n#     WHO: { value: tester }\necho \"$WHO pings $CTR $*\"\n";
+    std::fs::write(&file, body).unwrap();
+    let path = file.display().to_string();
+
+    let added = ikit.json(&["script", "add", &path]);
+    assert_eq!(added["status"], "added");
+    assert_eq!(added["runs_on"], "target");
+    assert_eq!(ikit.json(&["script", "add", &path])["status"], "unchanged");
+    assert_eq!(ikit.json(&["script", "list"])[0]["name"], "ping");
+    assert_eq!(ikit.ok(&["script", "export", "ping"]), body);
+    assert!(
+        ikit.ok(&["script", "show", "ping", "--body"])
+            .contains("CTR")
+    );
+
+    let wl = ikit.wl();
+    let preview = ikit.json(&["script", "run", "ping", "--dry-run"]);
+    assert_eq!(preview["params"][0]["value"], format!("{wl}-redis-1"));
+    assert!(
+        ikit.json(&["script", "history"])
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Running needs --yes without a terminal.
+    assert!(!ikit.run(&["script", "run", "ping"]).status.success());
+    let out = ikit.ok(&["script", "run", "ping", "-y", "--", "twice"]);
+    assert!(
+        out.contains(&format!("tester pings {wl}-redis-1 twice")),
+        "{out}"
+    );
+    let history = ikit.json(&["script", "history", "ping"]);
+    assert_eq!(history[0]["result"], "ok");
+    assert_eq!(ikit.json(&["wl", "runs"])[0]["action"], "script");
+
+    ikit.ok(&[
+        "hook", "add", "greet", "--script", "ping", "--param", "WHO=hook",
+    ]);
+    assert_eq!(ikit.json(&["hook", "list"])[0]["kind"], "script");
+    assert!(!ikit.run(&["script", "rm", "ping", "-y"]).status.success());
+    ikit.ok(&["hook", "rm", "greet", "-y"]);
+    ikit.ok(&["script", "rm", "ping", "-y"]);
+    assert!(
+        ikit.json(&["script", "list"])
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn mcp_http_tokens_and_networks_offline() {
     let ikit = Ikit::new("mcp");
     let out = ikit.run(&["mcp", "serve", "--http", "127.0.0.1:0"]);

@@ -22,6 +22,7 @@ string_enum! {
         Shell => "shell",
         Http => "http",
         Mcp => "mcp",
+        Script => "script",
     }
 }
 
@@ -147,6 +148,15 @@ impl McpAction {
     }
 }
 
+/// Runs a script from the org's script library (`ikit script`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptAction {
+    pub script: String,
+    /// Per-hook param overrides: `NAME -> value`, or `NAME -> @source` to resolve one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum HookAction {
@@ -154,6 +164,7 @@ pub enum HookAction {
     Shell(ShellAction),
     Http(HttpAction),
     Mcp(McpAction),
+    Script(ScriptAction),
 }
 
 impl HookAction {
@@ -163,6 +174,7 @@ impl HookAction {
             Self::Shell(_) => HookKind::Shell,
             Self::Http(_) => HookKind::Http,
             Self::Mcp(_) => HookKind::Mcp,
+            Self::Script(_) => HookKind::Script,
         }
     }
 
@@ -171,7 +183,7 @@ impl HookAction {
         match self {
             Self::Sql(a) => Some(&a.service),
             Self::Shell(a) => a.service.as_deref(),
-            Self::Http(_) | Self::Mcp(_) => None,
+            Self::Http(_) | Self::Mcp(_) | Self::Script(_) => None,
         }
     }
 
@@ -190,6 +202,12 @@ impl HookAction {
             },
             Self::Http(a) => format!("http {} {}", a.method, a.url_display),
             Self::Mcp(a) => format!("mcp {} via `{}`", a.tool, a.command.join(" ")),
+            Self::Script(a) if a.params.is_empty() => format!("script {}", a.script),
+            Self::Script(a) => format!(
+                "script {} ({})",
+                a.script,
+                a.params.keys().cloned().collect::<Vec<_>>().join(", ")
+            ),
         }
     }
 }

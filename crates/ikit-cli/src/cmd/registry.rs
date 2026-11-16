@@ -141,6 +141,13 @@ pub struct SpecArgs {
     /// SQS_QUEUE_URL=resource:jobs.url (repeatable).
     #[arg(long = "env-from", value_name = "NAME=REFERENCE")]
     env_from: Vec<String>,
+    /// Command that replaces the image's, split on whitespace, e.g. "python /app/worker.py".
+    /// Arguments containing spaces need `registry import`. With `version set`, "" clears it.
+    #[arg(long, value_name = "COMMAND")]
+    command: Option<String>,
+    /// Containers to run per instance (compose deploy.replicas), e.g. 3 workers on one queue.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    replicas: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -214,9 +221,20 @@ impl SpecArgs {
             && self.depends_on.is_empty()
             && self.needs.is_empty()
             && self.env_from.is_empty()
+            && self.command.is_none()
+            && self.replicas.is_none()
+    }
+
+    /// `--command` as argv; `Some(vec![])` for "".
+    fn command_argv(&self) -> Option<Vec<String>> {
+        self.command
+            .as_deref()
+            .map(|c| c.split_whitespace().map(str::to_owned).collect())
     }
 
     fn into_spec(self) -> anyhow::Result<ServiceSpec> {
+        let command = self.command_argv().unwrap_or_default();
+        let replicas = self.replicas;
         let mut env: Vec<EnvVar> = self
             .env
             .into_iter()
@@ -255,6 +273,8 @@ impl SpecArgs {
             volumes: self.volumes,
             depends_on: self.depends_on,
             needs: self.needs,
+            command,
+            replicas,
             ..Default::default()
         })
     }
@@ -464,8 +484,12 @@ pub async fn run(ctx: &Ctx, cmd: RegistryCmd) -> anyhow::Result<()> {
             {
                 return Ok(());
             }
+            let command = spec.command_argv();
+            let replicas = spec.replicas.map(Some);
             let spec = spec.into_spec()?;
             let changes = VersionChanges {
+                command,
+                replicas,
                 image,
                 digest: clearable(digest),
                 release_notes: clearable(notes),
@@ -754,9 +778,16 @@ fn render_entry(ctx: &Ctx, e: &RegistryEntry) -> anyhow::Result<()> {
             })
             .collect();
         let deps: Vec<String> = v.spec.depends_on.iter().map(ToString::to_string).collect();
+        let mut image = v.image.clone();
+        if !v.spec.command.is_empty() {
+            image.push_str(&format!("\ncommand: {}", v.spec.command.join(" ")));
+        }
+        if let Some(n) = v.spec.replicas {
+            image.push_str(&format!("\nreplicas: {n}"));
+        }
         let mut row = vec![
             v.version.to_string(),
-            v.image.clone(),
+            image,
             ports.join("\n"),
             env.join("\n"),
             deps.join("\n"),

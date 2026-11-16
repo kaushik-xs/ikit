@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO script_runs (script_id, run_id, workload, from_workload, hook, checksum,\n                                        params_json, result, exit_code, error, output_tail, ran_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "372de5306caa76d6a58972a39a72e0766e46b620d81681baa6a744d128cc4f86"
+}

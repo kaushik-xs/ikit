@@ -133,6 +133,8 @@ string_enum! {
         Hook => "hook",
         Backup => "backup",
         Restore => "restore",
+        /// `ikit script run`.
+        Script => "script",
     }
 }
 
