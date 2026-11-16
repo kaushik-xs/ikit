@@ -30,6 +30,9 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # crates.io allows a burst of new crates, then about one every 10 minutes; a first publish
+    # of the whole workspace waits out that limit.
+    timeout-minutes: 120
     environment: crates-io
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +61,31 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
+          # Publishes one crate, waiting out crates.io's rate limit (429, "try again after
+          # <date>") and retrying instead of failing the run.
+          publish() {
+            local out after wait
+            for attempt in 1 2 3 4 5 6; do
+              if out=$(cargo publish -p "$1" --allow-dirty --locked 2>&1 | tee /dev/stderr); then
+                return 0
+              fi
+              if ! grep -q '429 Too Many Requests' <<<"$out"; then
+                return 1
+              fi
+              after=$(grep -oP 'try again after \K.*?GMT' <<<"$out" | head -n1 || true)
+              if [ -n "$after" ]; then
+                wait=$(( $(date -d "$after" +%s) - $(date +%s) + 20 ))
+              else
+                wait=600
+              fi
+              [ "$wait" -lt 30 ] && wait=30
+              echo "::warning::crates.io rate limit on $1 (attempt $attempt): waiting ${wait}s${after:+ until $after}"
+              sleep "$wait"
+            done
+            echo "::error::$1 still rate limited after $attempt attempts" >&2
+            return 1
+          }
+
           meta=$(cargo metadata --no-deps --format-version 1)
           for crate in $CRATES; do
             version=$(jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version' <<<"$meta")
@@ -75,7 +103,7 @@ jobs:
               echo "::endgroup::"
             else
               echo "::group::publish $crate $version"
-              cargo publish -p "$crate" --allow-dirty --locked
+              publish "$crate"
               echo "::endgroup::"
             fi
           done
