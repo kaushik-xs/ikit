@@ -153,6 +153,9 @@ enum Command {
     /// Manage individual services in a workload.
     #[command(subcommand, name = "svc", alias = "service")]
     Service(cmd::service::ServiceCmd),
+    /// Open a terminal UI over the whole flow (orgs, registry, targets, workloads, deploys,
+    /// routes, hooks, ...). It runs these same commands underneath.
+    Tui,
 }
 
 impl Ctx {
@@ -198,6 +201,8 @@ pub struct Ctx {
     pub output: Output,
     pub interactive: bool,
     pub identity: ikit_app::IdentityOptions,
+    /// Global flags given on the command line that must reach commands `ikit tui` runs.
+    pub forward: Vec<String>,
 }
 
 #[tokio::main]
@@ -211,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    let forward = forwarded_flags(&cli);
 
     let ctx = Ctx {
         paths: ikit_app::Paths::resolve(cli.home)?,
@@ -222,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
             file: cli.identity_file,
             ..Default::default()
         },
+        forward,
     };
 
     let access = cli.command.access();
@@ -301,7 +308,28 @@ async fn dispatch(ctx: &Ctx, command: Command) -> anyhow::Result<()> {
         Command::Status { drift: false, .. } => cmd::deploy::status(ctx).await,
         Command::Status { drift: true, all } => cmd::deploy::drift(ctx, all).await,
         Command::Destroy { volumes, yes } => cmd::deploy::destroy(ctx, volumes, yes).await,
+        Command::Tui => cmd::tui::run(ctx).await,
     }
+}
+
+/// The global flags `ikit tui` passes on to the commands it runs (--org and --wl follow the
+/// TUI's own selection instead). Values that came from the environment reach them anyway.
+fn forwarded_flags(cli: &Cli) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(home) = &cli.home {
+        args.push("--home".to_string());
+        args.push(home.display().to_string());
+    }
+    if let Some(file) = &cli.identity_file {
+        args.push("--identity-file".to_string());
+        args.push(file.display().to_string());
+    }
+    args.push("--lock-timeout".to_string());
+    args.push(cli.lock_timeout.to_string());
+    if cli.verbose > 0 {
+        args.push(format!("-{}", "v".repeat(cli.verbose as usize)));
+    }
+    args
 }
 
 fn init_tracing(verbose: u8) {

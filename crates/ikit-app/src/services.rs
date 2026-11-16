@@ -164,6 +164,42 @@ impl App {
         Ok(self.workload_show(workload).await?.services)
     }
 
+    /// The stored value of one of a service's secret env vars, in clear text. Only works for
+    /// whoever can already read the org's secrets (keychain, or a key the secrets file is
+    /// encrypted to); callers decide whether to show it.
+    pub async fn service_secret_value(
+        &self,
+        workload: &str,
+        name: &str,
+        key: &str,
+    ) -> Result<String> {
+        let (service, _) = self.service_show(workload, name).await?;
+        if !service.secret_env.iter().any(|k| k == key) {
+            return Err(AppError::NotFound(format!(
+                "secret `{key}` of `{name}` in {workload} (its secrets: {})",
+                if service.secret_env.is_empty() {
+                    "none".to_owned()
+                } else {
+                    service.secret_env.join(", ")
+                }
+            )));
+        }
+        let store_key = self.service_secret_key(workload, name);
+        let json = self.secrets.get(&store_key)?.ok_or_else(|| {
+            AppError::NotFound(format!(
+                "stored secrets of `{name}` in {workload}; set them with `ikit svc set {name} --secret {key}`"
+            ))
+        })?;
+        let values: BTreeMap<String, String> = serde_json::from_str(&json).map_err(|e| {
+            AppError::Invalid(format!("keychain entry {store_key} is not valid JSON: {e}"))
+        })?;
+        values.get(key).cloned().ok_or_else(|| {
+            AppError::NotFound(format!(
+                "a value for `{key}` of `{name}`; set it with `ikit svc set {name} --secret {key}`"
+            ))
+        })
+    }
+
     pub async fn service_show(
         &self,
         workload: &str,
@@ -872,6 +908,38 @@ mod tests {
                 .is_empty(),
             "nothing written on failure"
         );
+    }
+
+    #[tokio::test]
+    async fn secret_value_reads_only_declared_secrets() {
+        let (_dir, app, _secrets) = setup().await;
+        let pg = req(
+            "postgres",
+            "16",
+            Category::Data,
+            &[("POSTGRES_PASSWORD", "pw"), ("POSTGRES_DB", "orders")],
+        );
+        app.services_add("wl-acme-dev-001", vec![pg]).await.unwrap();
+
+        let wl = "wl-acme-dev-001";
+        assert_eq!(
+            app.service_secret_value(wl, "postgres", "POSTGRES_PASSWORD")
+                .await
+                .unwrap(),
+            "pw"
+        );
+        // Plain env vars and unknown names are not secrets.
+        for key in ["POSTGRES_DB", "NOPE"] {
+            assert!(matches!(
+                app.service_secret_value(wl, "postgres", key).await,
+                Err(AppError::NotFound(_))
+            ));
+        }
+        assert!(matches!(
+            app.service_secret_value(wl, "nope", "POSTGRES_PASSWORD")
+                .await,
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

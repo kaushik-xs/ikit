@@ -66,6 +66,25 @@ pub enum ServiceCmd {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Read a service's secret env values.
+    #[command(subcommand)]
+    Secret(SecretCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCmd {
+    /// Print a secret env value in clear text. Works only for whoever can already read the
+    /// org's secrets (the keychain, or a key the secrets file is encrypted to).
+    ///
+    /// Only the value goes to stdout, so `$(ikit svc secret show api DB_PASS --yes)` works;
+    /// mind shell history, scrollback and logs.
+    Show {
+        name: String,
+        key: String,
+        /// Skip the confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 pub async fn run(ctx: &Ctx, cmd: ServiceCmd) -> anyhow::Result<()> {
@@ -224,6 +243,25 @@ pub async fn run(ctx: &Ctx, cmd: ServiceCmd) -> anyhow::Result<()> {
                 ports.join(", ")
             };
             println!("{name} publishes {ports}. Run `ikit apply` to make it take effect.");
+        }
+        ServiceCmd::Secret(SecretCmd::Show { name, key, yes }) => {
+            // Check it exists before asking, so a typo fails without a prompt.
+            let value = app.service_secret_value(&wl, &name, &key).await?;
+            if !ctx.confirm(
+                &format!("Print the secret {name}.{key} of {wl} in clear text?"),
+                yes,
+            )? {
+                return Ok(());
+            }
+            if ctx.output == Output::Json {
+                return print_json(&serde_json::json!({
+                    "workload": wl,
+                    "service": name,
+                    "key": key,
+                    "value": value,
+                }));
+            }
+            println!("{value}");
         }
         ServiceCmd::Rm { names, yes } => {
             if ctx.confirm(&format!("Remove {} from {wl}?", names.join(", ")), yes)? {

@@ -16,4 +16,5 @@ pub mod script;
 pub mod service;
 pub mod storage;
 pub mod target;
+pub mod tui;
 pub mod workload;
