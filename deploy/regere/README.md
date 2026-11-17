@@ -11,6 +11,7 @@ of envs (dev, qa, stg, ...) on one Docker engine without names colliding.
 | `scripts/seed-app.sh` | Library script: launchpad's service list (pointing at the linked platform), authrs tenants and admins, the core tenant. A `post-apply` hook on the app workload. |
 | `env-up.sh` | Brings up one env: creates (or resets) the two workloads, adds the services, links them, adds the hooks, publishes or routes, applies. |
 | `mock-backends.sh` | Local S3 (RustFS) and SQS (ElasticMQ) for a mock run in a throwaway ikit home. |
+| `ui-local.sh` | Builds client-ui-next for one app workload so the browser calls that workload's launchpad (see below). |
 
 ## Naming
 
@@ -50,6 +51,27 @@ only user), so core reaches it as `http://decision-hub:8080`. A new env is `env-
 | common-services `shm_size: 2gb`, `extra_hosts` host-gateway | `shm_size` in the spec; route hosts mapped to the host automatically |
 | Caddy: `/ui/app1*` unstripped, `/rt/app/*` stripped, `/` redirected | `route add --keep-prefix`, a stripped `/rt` route, a `redir` snippet (`env-up.sh --public-url`) |
 | redis on `0.0.0.0:6378`, postgres on the ZeroTier IP | nothing published except what browsers need (or what you publish on purpose) |
+
+## The UI talks to yotta unless you build it
+
+The published `client-ui-next:staging-latest` has `https://launchpad-headless-dev.regere.ai`
+compiled into its browser bundle (Next.js inlines `NEXT_PUBLIC_*` at build time). Whatever
+ikit sets at runtime, a UI from that image logs in to, reads and **writes** yotta dev; only
+its server side reaches the workload's own launchpad. Until client-ui-next reads its URLs at
+runtime, build it per app workload:
+
+```bash
+deploy/regere/ui-local.sh --app wl-regere-dev-005            # --src <checkout>, default ../client-ui-next
+```
+
+```bash
+deploy/regere/ui-local.sh --app wl-regere-dev-005 --undo     # back to the published image
+```
+
+It builds the checkout with the workload's own `NEXT_PUBLIC_LAUNCHPAD_API_URL` and simulation
+URL (what `env-up.sh` set), adds registry version `0.0.0-local.<wl>.g<sha>` for the image (a
+pre-release, so `latest` never picks it for another workload), pins the workload to it and
+applies. The image lives only on the engine that built it, so run it where the target is.
 
 ## Mock run (laptop, nothing outside it touched)
 
