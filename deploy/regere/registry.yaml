@@ -136,7 +136,7 @@ services:
       description: Unset on AWS; set for an S3-compatible backend
     - name: DECISION_HUB_URL
       from: service:decision-hub.internal_url
-      description: decision-hub of the linked platform workload
+      description: decision-hub in this (the app) workload
     - name: DECISION_HUB_LOG_CURL
       default: '1'
     - name: DECISION_HUB_TIMEOUT_SECS

@@ -93,6 +93,14 @@ if [ "$RESET" = 1 ]; then
   done
 fi
 echo "platform: $PF   app: $APP" >&2
+# Both workloads stand alone. Reused workloads may still carry a `wl link` from an older
+# env-up.sh, which would put their app and platform services on a shared network: drop
+# every link either one has, in both directions.
+for wl in "$APP" "$PF"; do
+  links=$($IKIT --no-input --wl "$wl" wl links -o json)
+  for p in $(jq -r '.links_to[]' <<<"$links"); do ik wl unlink "$p" --wl "$wl"; done
+  for c in $(jq -r '.linked_from[]' <<<"$links"); do ik wl unlink "$wl" --wl "$c"; done
+done
 
 # 3. Platform workload. Secrets marked `generate` are created here, APP_KEY_SEED among them.
 export IKIT_SECRET_COMMON_SERVICES_SMTP_PASS=$SMTP_PASS

@@ -1,15 +1,16 @@
 # regere environments with ikit
 
 What replaces `yotta-infra/new-app-dev` (the app) and `yotta-infra/new-app-dev-platform` (its
-platform), as two linked ikit workloads per environment. The same files bring up any number
+platform), as two standalone ikit workloads per environment: they share no network, and the
+app reaches the platform only through platform-gw. The same files bring up any number
 of envs (dev, qa, stg, ...) on one Docker engine without names colliding.
 
 | File | What it is |
 |---|---|
-| `registry.yaml` | Registry versions (spec revision `+spec.1`) whose databases, URLs and keys come from templates, links, resources and generated secrets. `ikit registry import deploy/regere/registry.yaml`. |
+| `registry.yaml` | Registry versions (spec revision `+spec.1`) whose databases, URLs and keys come from templates, resources and generated secrets. `ikit registry import deploy/regere/registry.yaml`. |
 | `scripts/create-service-dbs.sh` | Library script: a role and database per service from its `DB_NAME`/`DB_USER`/`DB_PASSWORD`. A `post-data` hook on both workloads. |
-| `scripts/seed-app.sh` | Library script: launchpad's service list (pointing at the linked platform), authrs tenants and admins, the core tenant. A `post-apply` hook on the app workload. |
-| `env-up.sh` | Brings up one env: creates (or resets) the two workloads, adds the services, links them, adds the hooks, publishes or routes, applies. |
+| `scripts/seed-app.sh` | Library script: launchpad's service list (the platform services at `<gateway>/<slug>`), authrs tenants and admins, the core tenant. A `post-apply` hook on the app workload. |
+| `env-up.sh` | Brings up one env: creates (or resets) the two workloads, adds the services, removes any `wl link` left on either workload, adds the hooks, publishes or routes, applies. |
 | `mock-backends.sh` | Local S3 (RustFS) and SQS (ElasticMQ) for a mock run in a throwaway ikit home. |
 
 ## Naming
