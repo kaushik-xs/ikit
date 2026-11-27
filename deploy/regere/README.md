@@ -12,6 +12,7 @@ of envs (dev, qa, stg, ...) on one Docker engine without names colliding.
 | `scripts/seed-app.sh` | Library script: launchpad's service list (the platform services at `<gateway>/<slug>`), authrs tenants and admins, the core tenant. A `post-apply` hook on the app workload. |
 | `env-up.sh` | Brings up one env: creates (or resets) the two workloads, adds the services, removes any `wl link` left on either workload, adds the hooks, publishes or routes, applies. |
 | `mock-backends.sh` | Local S3 (RustFS) and SQS (ElasticMQ) for a mock run in a throwaway ikit home. |
+| `ui-local.sh` | Builds client-ui-next for one app workload so the browser calls that workload's launchpad (see below). |
 
 ## Naming
 
@@ -58,6 +59,27 @@ Inside a workload nothing is written down either: references such as
 | Caddy: `/ui/app1*` unstripped, `/rt/app/*` stripped, `/` redirected | a stripped `/rt` route; the UI at the root (`env-up.sh --public-url`) |
 | client-ui-next (Next.js) at `/ui/app1` | dwigital-shell at the UI host's root (its links are root-absolute); launchpad on its own host (`env-up.sh --public-url … --api-url …`); dwigital-shell calls launchpad server-side over the workload network |
 | redis on `0.0.0.0:6378`, postgres on the ZeroTier IP | nothing published except what browsers need (or what you publish on purpose) |
+
+## The UI talks to yotta unless you build it
+
+The published `client-ui-next:staging-latest` has `https://launchpad-headless-dev.regere.ai`
+compiled into its browser bundle (Next.js inlines `NEXT_PUBLIC_*` at build time). Whatever
+ikit sets at runtime, a UI from that image logs in to, reads and **writes** yotta dev; only
+its server side reaches the workload's own launchpad. Until client-ui-next reads its URLs at
+runtime, build it per app workload:
+
+```bash
+deploy/regere/ui-local.sh --app wl-regere-dev-005            # --src <checkout>, default ../client-ui-next
+```
+
+```bash
+deploy/regere/ui-local.sh --app wl-regere-dev-005 --undo     # back to the published image
+```
+
+It builds the checkout with the workload's own `NEXT_PUBLIC_LAUNCHPAD_API_URL` and simulation
+URL (what `env-up.sh` set), adds registry version `0.0.0-local.<wl>.g<sha>` for the image (a
+pre-release, so `latest` never picks it for another workload), pins the workload to it and
+applies. The image lives only on the engine that built it, so run it where the target is.
 
 ## Mock run (laptop, nothing outside it touched)
 
