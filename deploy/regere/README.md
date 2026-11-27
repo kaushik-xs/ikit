@@ -1,15 +1,16 @@
 # regere environments with ikit
 
 What replaces `yotta-infra/new-app-dev` (the app) and `yotta-infra/new-app-dev-platform` (its
-platform), as two linked ikit workloads per environment. The same files bring up any number
+platform), as two standalone ikit workloads per environment: they share no network, and the
+app reaches the platform only through platform-gw. The same files bring up any number
 of envs (dev, qa, stg, ...) on one Docker engine without names colliding.
 
 | File | What it is |
 |---|---|
-| `registry.yaml` | Registry versions (spec revision `+spec.1`) whose databases, URLs and keys come from templates, links, resources and generated secrets. `ikit registry import deploy/regere/registry.yaml`. |
+| `registry.yaml` | Registry versions (spec revision `+spec.1`) whose databases, URLs and keys come from templates, resources and generated secrets. `ikit registry import deploy/regere/registry.yaml`. |
 | `scripts/create-service-dbs.sh` | Library script: a role and database per service from its `DB_NAME`/`DB_USER`/`DB_PASSWORD`. A `post-data` hook on both workloads. |
-| `scripts/seed-app.sh` | Library script: launchpad's service list (pointing at the linked platform), authrs tenants and admins, the core tenant. A `post-apply` hook on the app workload. |
-| `env-up.sh` | Brings up one env: creates (or resets) the two workloads, adds the services, links them, adds the hooks, publishes or routes, applies. |
+| `scripts/seed-app.sh` | Library script: launchpad's service list (the platform services at `<gateway>/<slug>`), authrs tenants and admins, the core tenant. A `post-apply` hook on the app workload. |
+| `env-up.sh` | Brings up one env: creates (or resets) the two workloads, adds the services, removes any `wl link` left on either workload, adds the hooks, publishes or routes, applies. |
 | `mock-backends.sh` | Local S3 (RustFS) and SQS (ElasticMQ) for a mock run in a throwaway ikit home. |
 
 ## Naming
@@ -21,23 +22,29 @@ Everything derives from the workload name, which ikit makes unique in the org
 |---|---|---|
 | Compose project, containers | `<wl>`, `<wl>-<svc>-<n>` | `wl-regere-dev-002-common-services-1` |
 | Group networks, volumes | `<wl>_<group>`, `<wl>_<svc>_<vol>` | `wl-regere-dev-002_platform` |
-| Network the platform offers | `<wl>-link` | `wl-regere-dev-002-link` |
-| How the app reaches a platform service | `<wl>-<svc>` | `http://wl-regere-dev-002-common-services:80` |
+| How the app reaches a platform service | platform-gw, `<gateway>/<slug>` with the apps' key | `http://172.17.0.1:10003/load-optimizer` (local), `https://gw.stg.regere.ai/load-optimizer` |
 | Buckets, queues | `<wl>-<svc>-<need>[-suffix]` | `wl-regere-dev-002-simulation-service-jobs` |
 | Databases, roles | `DB_NAME`, `DB_USER` per service, in the workload's own postgres | `load_optimizer`, `load_optimizer_app` |
 
-No service name or URL is written down anywhere: `core`'s `DECISION_HUB_URL` is
-`service:decision-hub.internal_url`, and the UI's `COMMON_SERVICES_URL` is
-`service:common-services.internal_url`: each resolves in the workload first, then in the
-platform workload it links to. decision-hub runs in the app workload (with RabbitMQ, its
-only user), so core reaches it as `http://decision-hub:8080`. A new env is `env-up.sh --env qa --target <target>`.
+The platform is standalone: the two workloads share no network, and platform-gw is the
+only way in. `seed-platform-gw` (a `post-apply` hook on the platform) registers the
+platform services in the gateway and issues one key for the apps, derived from the
+platform's generated `APP_KEY_SEED` secret and usable only from `APP_ALLOWED_IPS`.
+`env-up.sh` hands that key to launchpad (`PLATFORM_GW_API_KEY`, a secret) with the gateway
+URL (`PLATFORM_GW_URL`), and `seed-app` registers the platform services in launchpad as
+`<gateway>/<slug>`. launchpad sends the key only to URLs under the gateway. Sockudo is
+reached directly (the gateway doesn't carry WebSockets). decision-hub runs in the app
+workload (with RabbitMQ, its only user), so core reaches it as `http://decision-hub:8080`.
+Inside a workload nothing is written down either: references such as
+`service:decision-hub.internal_url` resolve to the workload's own services. A new env is `env-up.sh --env qa --target <target>`.
 
 ## What changed against yotta
 
 | yotta | here |
 |---|---|
-| `pf-*` service keys kept as DNS aliases so `http://pf-decision-hub:8080` resolves | `wl link`; references resolve to `<platform-wl>-<svc>` |
-| launchpad service rows seeded with `pf-*` and `workflow_engine` hostnames | `seed-app` builds them from the linked workload's internal URLs (and repoints a restored database, since the seed upserts by slug) |
+| `pf-*` service keys kept as DNS aliases so `http://pf-decision-hub:8080` resolves | No shared network: the app calls the platform through platform-gw with its own key, limited to the app hosts' IPs |
+| launchpad service rows seeded with `pf-*` and `workflow_engine` hostnames, bypassing the gateway | `seed-app` points them at `<gateway>/<slug>` (and repoints a restored database, since the seed upserts by slug) |
+| platform-gw rows and keys entered by hand in its console | `seed-platform-gw` hook: the same slugs, timeouts and `strip_prefix`, upserted on every apply |
 | Passwords and keys pasted into `app.env` / `data.env`, one in `init.sh` in plain text | Generated by ikit (`generate:`) and kept in the org's secret store |
 | `create-db.sh` with a CSV of roles and passwords, run by hand | `create-service-dbs` as a `post-data` hook: databases exist before services start |
 | Hand-made buckets and SQS queue, shared AWS keys | `needs:` per service; `ikit apply` creates them, per-service IAM keys on AWS |
@@ -48,7 +55,8 @@ only user), so core reaches it as `http://decision-hub:8080`. A new env is `env-
 | decision-hub `kaushik91/decision-hub` running, compose file asking for ghcr | `ghcr.io/regere-ai/decision-hub:latest` |
 | decision-hub and RabbitMQ in the platform stack | both in the app workload, next to core and workflow-engine; the platform runs no broker |
 | common-services `shm_size: 2gb`, `extra_hosts` host-gateway | `shm_size` in the spec; route hosts mapped to the host automatically |
-| Caddy: `/ui/app1*` unstripped, `/rt/app/*` stripped, `/` redirected | `route add --keep-prefix`, a stripped `/rt` route, a `redir` snippet (`env-up.sh --public-url`) |
+| Caddy: `/ui/app1*` unstripped, `/rt/app/*` stripped, `/` redirected | a stripped `/rt` route; the UI at the root (`env-up.sh --public-url`) |
+| client-ui-next (Next.js) at `/ui/app1` | dwigital-shell at the UI host's root (its links are root-absolute); launchpad on its own host (`env-up.sh --public-url … --api-url …`); dwigital-shell calls launchpad server-side over the workload network |
 | redis on `0.0.0.0:6378`, postgres on the ZeroTier IP | nothing published except what browsers need (or what you publish on purpose) |
 
 ## Mock run (laptop, nothing outside it touched)
