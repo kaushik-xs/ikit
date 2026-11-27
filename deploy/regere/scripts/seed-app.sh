@@ -4,7 +4,7 @@
 #   description: Register the platform services in launchpad, and seed authrs tenants and the core tenant (safe to re-run)
 #   runs_on: target
 #   params:
-#     TENANT: service.client-ui-next.env.TENANT
+#     TENANT: service.dwigital-shell.env.TENANT
 #     TENANT_NAME: { value: "Siemens Energy" }
 #     ADMIN_EMAIL: service.authrs.env.SEED_ADMIN_EMAIL
 #     ADMIN_PASSWORD: service.authrs.env.SEED_ADMIN_PASSWORD
@@ -16,23 +16,25 @@
 #     AUTHRS_URL: service.authrs.internal_url
 #     CORE_URL: service.core.internal_url
 #     WORKFLOW_URL: service.workflow-engine.internal_url
-#     LOAD_OPTIMIZER_URL: service.load-optimizer.internal_url
-#     SIMULATION_URL: service.simulation-service.internal_url
-#     YARD_URL: service.yard-recom.internal_url
-#     MESSAGE_FLOW_URL: service.message-flow.internal_url
+#     PLATFORM_GW_URL: service.launchpad.env.PLATFORM_GW_URL
 #     DECISION_HUB_URL: service.decision-hub.internal_url
-#     SOCKUDO_URL: service.sockudo.internal_url
-#     COMMON_SERVICES_URL: service.common-services.internal_url
+#     SOCKUDO_URL: { value: "" }
 #   timeout: 600
 #
-# A post-apply hook on the app workload, which must be linked to its platform workload
-# (`ikit wl link`): the platform URLs resolve to that workload's services, e.g.
-# http://wl-regere-dev-002-common-services:80. decision-hub runs in the app workload itself.
-#   ikit hook add seed --script seed-app --phase post-apply --param TENANT_NAME="Siemens Energy"
+# A post-apply hook on the app workload. The platform is a separate workload reached only
+# through platform-gw (launchpad's PLATFORM_GW_URL, called with PLATFORM_GW_API_KEY), so
+# its services are registered as <gateway>/<slug>, the gateway slugs seed-platform-gw
+# creates. common-services keeps its /common-services path prefix (strip_prefix off in the
+# gateway), so its row is the gateway root. Sockudo needs WebSockets, which the gateway
+# doesn't carry: SOCKUDO_URL is its own address. decision-hub runs in the app workload.
+#   ikit hook add seed --script seed-app --phase post-apply \
+#     --param TENANT_NAME="Siemens Energy" --param SOCKUDO_URL=https://stg.regere.ai/rt
 #
 # Every seed upserts, so re-running it is safe. Launchpad's upsert also rewrites each
 # service's base_url, which repoints a database restored from another stack.
 set -euo pipefail
+: "${SOCKUDO_URL:?pass --param SOCKUDO_URL=<sockudo address reachable from launchpad>}"
+GW=${PLATFORM_GW_URL%/}
 dc() { docker compose -p "$IKIT_WORKLOAD" -f compose.yaml -f secrets.compose.yaml "$@"; }
 
 services=$(cat <<JSON
@@ -41,13 +43,13 @@ services=$(cat <<JSON
   {"slug":"","name":"Launchpad","base_url":"${LAUNCHPAD_PUBLIC_URL%/}","service_type":"other","docker_image":"kaushik91/launchpad","tag":"latest"},
   {"slug":"core","name":"Core","base_url":"$CORE_URL","service_type":"framework","docker_image":"kaushik91/service-kit","tag":"latest"},
   {"slug":"workflow","name":"Workflow Engine","base_url":"$WORKFLOW_URL","service_type":"other","docker_image":"kaushik91/workflow-engine","tag":"latest"},
-  {"slug":"load-optimizer","name":"Load Optimizer","base_url":"$LOAD_OPTIMIZER_URL","service_type":"platform","docker_image":"ghcr.io/regere-ai/load-optimizer","tag":"latest"},
-  {"slug":"simulation","name":"Simulation","base_url":"$SIMULATION_URL","service_type":"platform","docker_image":"ghcr.io/regere-ai/simulation-service-v2","tag":"latest"},
-  {"slug":"yard-recom","name":"Yard-Recommendation","base_url":"$YARD_URL","service_type":"platform","docker_image":"ghcr.io/regere-ai/yard-recom","tag":"latest"},
-  {"slug":"message-flow","name":"Message-Flow","base_url":"$MESSAGE_FLOW_URL","service_type":"platform","docker_image":"ghcr.io/regere-ai/message-flow","tag":"latest"},
+  {"slug":"load-optimizer","name":"Load Optimizer","base_url":"$GW/load-optimizer","service_type":"platform","docker_image":"ghcr.io/regere-ai/load-optimizer","tag":"latest"},
+  {"slug":"simulation","name":"Simulation","base_url":"$GW/simulation","service_type":"platform","docker_image":"ghcr.io/regere-ai/simulation-service-v2","tag":"latest"},
+  {"slug":"yard-recom","name":"Yard-Recommendation","base_url":"$GW/yard-recom","service_type":"platform","docker_image":"ghcr.io/regere-ai/yard-recom","tag":"latest"},
+  {"slug":"message-flow","name":"Message-Flow","base_url":"$GW/message-flow","service_type":"platform","docker_image":"ghcr.io/regere-ai/message-flow","tag":"latest"},
   {"slug":"decision-hub","name":"Decision-Hub","base_url":"$DECISION_HUB_URL","service_type":"platform","docker_image":"ghcr.io/regere-ai/decision-hub","tag":"latest"},
-  {"slug":"socket","name":"Sockudo","base_url":"$SOCKUDO_URL","service_type":"platform","docker_image":"godson326/sockudo","tag":"latest"},
-  {"slug":"common-service","name":"Common Service","base_url":"$COMMON_SERVICES_URL","service_type":"platform","docker_image":"ghcr.io/regere-ai/common-services","tag":"latest"}
+  {"slug":"socket","name":"Sockudo","base_url":"${SOCKUDO_URL%/}","service_type":"platform","docker_image":"godson326/sockudo","tag":"latest"},
+  {"slug":"common-service","name":"Common Service","base_url":"$GW","service_type":"platform","docker_image":"ghcr.io/regere-ai/common-services","tag":"latest"}
 ]
 JSON
 )

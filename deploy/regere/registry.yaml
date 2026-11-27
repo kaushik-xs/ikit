@@ -57,7 +57,7 @@ services:
       default: noreply@regere.ai
     - name: FRONTEND_URL
       required: true
-      description: Public URL of the UI, e.g. https://<host>/ui/app1
+      description: Public URL of the UI (dwigital-shell), e.g. https://<host>
     - name: DEFAULT_SESSION_TTL_SECS
       default: '288000'
     - name: BUILDER_TENANT_ID
@@ -195,6 +195,11 @@ services:
       default: https://accounts-api.regere.ai/api/setup-package
     - name: PUBLIC_URL
       description: Launchpad's public URL; the seed-app script registers it as the Launchpad service
+    - name: PLATFORM_GW_URL
+      description: platform-gw proxy URL. Services registered under it are called with X-Api-Key (needs Regere-AI/launchpad#2)
+    - name: PLATFORM_GW_API_KEY
+      secret: true
+      description: The platform-gw key sent to services under PLATFORM_GW_URL (env-up.sh derives it from the platform's APP_KEY_SEED)
     depends_on:
     - postgres@latest
     - authrs@latest
@@ -235,51 +240,57 @@ services:
     depends_on:
     - postgres@latest
     - redis@latest
-- name: client-ui-next
-  display_name: Client UI (Next.js)
+- name: dwigital-shell
+  display_name: Dwigital Shell
+  description: Config-driven iRender UI; replaces client-ui-next
   category: app
+  homepage: https://github.com/Regere-AI/dwigital-shell
   tags:
-  - nextjs
+  - rust
   - ui
   versions:
   - version: 0.0.0+spec.1
-    image: ghcr.io/regere-ai/client-ui-next:staging-latest
-    release_notes: 'Floating tag `staging-latest`. Spec revision 1: databases, URLs and keys come from templates, links, resources and generated secrets instead of pasted values.'
+    image: ghcr.io/regere-ai/dwigital-shell:latest
+    release_notes: 'Floating tag `latest`. Must be served at a domain root (root-absolute links) unless BASE_PATH is set and the proxy strips it.'
     ports:
     - container: 3000
       name: http
     env:
-    - name: NEXT_PUBLIC_LAUNCHPAD_API_URL
+    - name: DWIGITAL_ADDR
+      default: 0.0.0.0:3000
+    - name: BASE_URL
       required: true
-      description: Launchpad's public URL, as the browser sees it
-    - name: LAUNCHPAD_API_URL
-      from: template:{{service:launchpad.internal_url}}/
+      description: This site's public URL, as the browser sees it
+    - name: API_BASE_URL
+      from: service:launchpad.internal_url
+      description: Launchpad host; called server-side only (+ /proxy/authrs, /proxy/core, /proxy/workflow)
+    - name: BASE_PATH
+      description: Path prefix the proxy strips before forwarding; empty at a domain root
     - name: TENANT
       required: true
-    - name: NEXT_PUBLIC_LOG_LEVEL
-      default: debug
-    - name: NODE_ENV
-      default: production
-    - name: APP_BASE_PATH
-      default: /ui/app1
-    - name: NEXT_PUBLIC_COMPANY_LOGO
-    - name: NEXT_PUBLIC_EMAIL_PASSWORD_LOGIN_ENABLED
+      description: Tenants the login page offers, comma-separated
+    - name: ENABLE_MFA
+      default: 'false'
+      enum: *id001
+    - name: ENABLE_MICROSOFT_LOGIN
       default: 'true'
       enum: *id001
-    - name: NEXT_PUBLIC_USERNAME_PASSWORD_LOGIN_ENABLED
-      default: 'true'
-      enum: *id001
-    - name: NEXT_PUBLIC_MICROSOFT_LOGIN_ENABLED
-      default: 'true'
-      enum: *id001
-    - name: NEXT_PUBLIC_LOGIN_BACKGROUND_IMAGE_URL
-    - name: NEXT_PUBLIC_SIMULATION_API_BASE_URL
-      description: Public URL of launchpad's /proxy/simulation
-    - name: COMMON_SERVICES_URL
-      from: service:common-services.internal_url
-      description: common-services of the linked platform workload
-    - name: NEXT_PUBLIC_COMMON_SERVICES_BASE_URL
-      default: /proxy/common-services/common-services
+    - name: LOGO_URL
+      description: Login page logo
+    - name: DWIGITAL_BANNER_TEXT
+      description: Strip across the top of every screen; empty means none
+    - name: LOG_FORMAT
+      default: json
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      description: OTLP/HTTP collector; unset turns export off
+    - name: OTEL_SERVICE_NAME
+      default: dwigital-shell
+    - name: OTEL_RESOURCE_ATTRIBUTES
+      from: template:deployment.environment={{env}}
+    depends_on:
+    - launchpad@latest
+    - authrs@latest
+    - core@latest
 - name: common-services
   display_name: Common Services
   description: Shared email and file storage services
@@ -618,6 +629,14 @@ services:
     - name: GW_ADMIN_PASSWORD
       secret: true
       generate: password
+    - name: APP_KEY_SEED
+      secret: true
+      generate: hex32
+      description: Not read by the gateway. seed-platform-gw derives the apps' API key from it (pgw_<hex 0-8>_<hex 8-48>)
+    - name: APP_ALLOWED_IPS
+      description: 'Not read by the gateway. seed-platform-gw makes it the apps'' key IP allowlist: the app hosts'' egress IPs/CIDRs, comma separated (needs platform-gw with IP rules, Regere-AI/platform-gw#5)'
+    - name: GW_PROXY__TRUSTED_PROXIES
+      description: CIDRs of reverse proxies in front of the proxy port, comma separated; their X-Forwarded-For sets the client address for IP rules. Empty = TCP peer
     - name: GW_AI__DEFAULT_MAX_TOKENS
       default: '4096'
     - name: RUST_LOG

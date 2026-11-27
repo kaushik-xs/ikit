@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
-# Bring up one regere environment: an app workload linked to its own platform workload,
-# on one target. Run it again to bring up the next env (dev, qa, stg, ...); every name is
-# derived from the workload names ikit hands out, so envs never collide on a shared engine.
+# Bring up one regere environment: a standalone platform workload and an app workload that
+# reaches it only through platform-gw, on one target. Run it again to bring up the next env
+# (dev, qa, stg, ...); every name is derived from the workload names ikit hands out, so envs
+# never collide on a shared engine.
 #
 #   deploy/regere/env-up.sh --env dev --target laptop                 # two new workloads
 #   deploy/regere/env-up.sh --env dev --target laptop \
 #       --app wl-regere-dev-001 --platform wl-regere-dev-002 --reset  # reuse (and empty) these
-#   deploy/regere/env-up.sh --env stg --target box --public-url https://stg.regere.ai
+#   deploy/regere/env-up.sh --env stg --target box --public-url https://stg.regere.ai \
+#       --api-url https://api.stg.regere.ai --gateway-url https://gw.stg.regere.ai \
+#       --app-ips 203.0.113.7
+#
+# The two workloads share no network. launchpad calls the platform services at
+# <gateway>/<slug> with the platform-gw key that seed-platform-gw issues (derived from the
+# platform's APP_KEY_SEED secret), and that key only works from the --app-ips addresses.
 #
 # Without --public-url the UI and launchpad are published on 127.0.0.1 at ports ikit picks
-# (for local testing). With it, they are routed through the target's reverse proxy:
-#   <url>/ui/app1 -> client-ui-next (prefix kept), <url>/rt -> sockudo, <url> -> launchpad.
+# (for local testing), and platform-gw's proxy port and sockudo on the Docker bridge address
+# (--bridge-ip, default 172.17.0.1) so the app's containers can reach them. Docker NATs
+# those calls, so locally the key is limited to Docker's address ranges only.
+# With --public-url everything is routed through the target's reverse proxy:
+#   <public-url> -> dwigital-shell, <public-url>/rt -> sockudo, <api-url> -> launchpad,
+#   <gateway-url> -> platform-gw.
+# dwigital-shell's links are root-absolute, so it takes the domain root and launchpad needs
+# a host of its own. --api-url, --gateway-url and --app-ips (the app hosts' egress IPs or
+# CIDRs, comma separated) are required with --public-url.
 #
 # Secrets ikit cannot generate come from the environment:
 #   SMTP_PASS           ZeptoMail SMTP password (authrs, common-services, message-flow)
@@ -23,11 +37,15 @@ set -euo pipefail
 
 IKIT=${IKIT:-ikit}
 HERE=$(cd "$(dirname "$0")" && pwd)
-ENV_NAME="" TARGET="" APP="" PF="" RESET=0 PUBLIC_URL="" APPLY=1
+ENV_NAME="" TARGET="" APP="" PF="" RESET=0 PUBLIC_URL="" API_URL="" GW_URL="" APP_IPS="" APPLY=1
+BRIDGE_IP=172.17.0.1
+# Docker's default address pools: where NATed local callers and the host's reverse proxy
+# appear to come from.
+DOCKER_NETS=172.16.0.0/12,192.168.0.0/16
 TENANT=siemens_energy TENANT_NAME="Siemens Energy"
 COMPANY_LOGO="https://upload.wikimedia.org/wikipedia/commons/thumb/f/f2/Siemens_Energy_logo.svg/1280px-Siemens_Energy_logo.svg.png"
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --env) ENV_NAME=$2; shift ;;
@@ -36,6 +54,10 @@ while [ $# -gt 0 ]; do
     --platform) PF=$2; shift ;;
     --reset) RESET=1 ;;
     --public-url) PUBLIC_URL=${2%/}; shift ;;
+    --api-url) API_URL=${2%/}; shift ;;
+    --gateway-url) GW_URL=${2%/}; shift ;;
+    --app-ips) APP_IPS=$2; shift ;;
+    --bridge-ip) BRIDGE_IP=$2; shift ;;
     --tenant) TENANT=$2; shift ;;
     --tenant-name) TENANT_NAME=$2; shift ;;
     --company-logo) COMPANY_LOGO=$2; shift ;;
@@ -46,6 +68,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$ENV_NAME" ] && [ -n "$TARGET" ] || usage 1
+if [ -n "$PUBLIC_URL" ]; then
+  [ -n "$API_URL" ] || { echo "--public-url needs --api-url (launchpad's own host)" >&2; exit 1; }
+  [ -n "$GW_URL" ] || { echo "--public-url needs --gateway-url (platform-gw's host)" >&2; exit 1; }
+  [ -n "$APP_IPS" ] || { echo "--public-url needs --app-ips (the app hosts' egress IPs)" >&2; exit 1; }
+fi
 : "${SMTP_PASS:?set SMTP_PASS}" "${VAPID_PRIVATE_KEY:?set VAPID_PRIVATE_KEY}" "${VAPID_PUBLIC_KEY:?set VAPID_PUBLIC_KEY}"
 
 ik() { echo "+ ikit $*" >&2; $IKIT --no-input "$@"; }
@@ -67,7 +94,7 @@ if [ "$RESET" = 1 ]; then
 fi
 echo "platform: $PF   app: $APP" >&2
 
-# 3. Platform workload. Secrets marked `generate` are created here.
+# 3. Platform workload. Secrets marked `generate` are created here, APP_KEY_SEED among them.
 export IKIT_SECRET_COMMON_SERVICES_SMTP_PASS=$SMTP_PASS
 export IKIT_SECRET_MESSAGE_FLOW_MF_CHANNELS__EMAIL__PASSWORD=$SMTP_PASS
 export IKIT_SECRET_MESSAGE_FLOW_MF_CHANNELS__PUSH__VAPID_PRIVATE_KEY=$VAPID_PRIVATE_KEY
@@ -76,45 +103,75 @@ ik sg add platform --wl "$PF" \
   --services common-services,load-optimizer,message-flow,platform-gw,sockudo,yard-recom,simulation-service,simulation-worker \
   --set "message-flow.MF_CHANNELS__PUSH__VAPID_PUBLIC_KEY=$VAPID_PUBLIC_KEY"
 ik hook add service-dbs --wl "$PF" --script create-service-dbs --phase post-data
+# Gateway rows and the apps' key. Locally every caller arrives NATed from a Docker
+# network's gateway address; behind the host's reverse proxy the client is in
+# X-Forwarded-For, which the gateway believes only from those Docker addresses.
+if [ -n "$PUBLIC_URL" ]; then
+  ik svc set platform-gw --wl "$PF" "APP_ALLOWED_IPS=$APP_IPS" "GW_PROXY__TRUSTED_PROXIES=$DOCKER_NETS"
+else
+  ik svc set platform-gw --wl "$PF" "APP_ALLOWED_IPS=$DOCKER_NETS"
+fi
+ik hook add gw-seed --wl "$PF" --script seed-platform-gw --phase post-apply --param "TENANT=$TENANT"
 
-# 4. App workload, linked to the platform so the UI reaches common-services. decision-hub
-#    runs here, next to core and workflow-engine, with the only RabbitMQ it uses.
+# How the app reaches the platform: platform-gw for HTTP, sockudo directly (WebSockets).
+if [ -n "$PUBLIC_URL" ]; then
+  ik route add platform-gw --wl "$PF" --port proxy --host "${GW_URL#*://}" \
+    --tls "$(case "$GW_URL" in http://*) echo off ;; *) echo acme ;; esac)"
+  SOCKUDO_URL=$PUBLIC_URL/rt
+else
+  ik svc publish platform-gw --wl "$PF" "$BRIDGE_IP::8080"
+  ik svc publish sockudo --wl "$PF" "$BRIDGE_IP::6002"
+  bridge_port() { $IKIT --no-input --wl "$PF" svc list -o json \
+    | jq -r --arg s "$1" --arg b "$BRIDGE_IP" '.[] | select(.name == $s) | .publish[] | select(.bind == $b) | .host'; }
+  GW_URL="http://$BRIDGE_IP:$(bridge_port platform-gw)"
+  SOCKUDO_URL="http://$BRIDGE_IP:$(bridge_port sockudo)"
+fi
+# The apps' key, derived as seed-platform-gw does: pgw_<seed 1-8>_<seed 9-48>.
+seed=$($IKIT --no-input --wl "$PF" svc secret show platform-gw APP_KEY_SEED --yes)
+export IKIT_SECRET_LAUNCHPAD_PLATFORM_GW_API_KEY="pgw_${seed:0:8}_${seed:8:40}"
+unset seed
+
+# 4. App workload. decision-hub runs here, next to core and workflow-engine, with the only
+#    RabbitMQ it uses. dwigital-shell is the UI; it calls launchpad server-side over the
+#    workload network (API_BASE_URL from the registry).
 export IKIT_SECRET_AUTHRS_SMTP_PASS=$SMTP_PASS
 ik sg add data --wl "$APP" --services postgres,redis,rabbitmq
-ik sg add app --wl "$APP" --services authrs,core,launchpad,workflow-engine,decision-hub,client-ui-next \
-  --set "client-ui-next.TENANT=$TENANT" \
-  --set "client-ui-next.NEXT_PUBLIC_COMPANY_LOGO=$COMPANY_LOGO" \
-  --set "authrs.FRONTEND_URL=http://pending/ui/app1" \
-  --set "client-ui-next.NEXT_PUBLIC_LAUNCHPAD_API_URL=http://pending/"
-ik wl link "$PF" --wl "$APP"
+ik sg add app --wl "$APP" --services authrs,core,launchpad,workflow-engine,decision-hub,dwigital-shell \
+  --set "dwigital-shell.TENANT=$TENANT" \
+  --set "dwigital-shell.LOGO_URL=$COMPANY_LOGO" \
+  --set "authrs.FRONTEND_URL=http://pending" \
+  --set "dwigital-shell.BASE_URL=http://pending" \
+  --set "launchpad.PLATFORM_GW_URL=$GW_URL"
+ik svc set launchpad --wl "$APP" --secret PLATFORM_GW_API_KEY
+unset IKIT_SECRET_LAUNCHPAD_PLATFORM_GW_API_KEY
 ik hook add service-dbs --wl "$APP" --script create-service-dbs --phase post-data
-ik hook add seed --wl "$APP" --script seed-app --phase post-apply --param "TENANT_NAME=$TENANT_NAME"
+ik hook add seed --wl "$APP" --script seed-app --phase post-apply \
+  --param "TENANT_NAME=$TENANT_NAME" --param "SOCKUDO_URL=$SOCKUDO_URL"
 
 # 5. How browsers reach it.
 if [ -n "$PUBLIC_URL" ]; then
   host=${PUBLIC_URL#*://}
   tls=acme; case "$PUBLIC_URL" in http://*) tls=off ;; esac
-  ik route add client-ui-next --wl "$APP" --host "$host" --path /ui/app1 --keep-prefix --tls "$tls"
-  ik route add launchpad --wl "$APP" --host "$host" --tls "$tls"
-  printf 'redir / /ui/app1 302\n' | ik route snippet "$host" --wl "$APP" --file -
+  api_host=${API_URL#*://}
+  api_tls=acme; case "$API_URL" in http://*) api_tls=off ;; esac
+  ik route add dwigital-shell --wl "$APP" --host "$host" --tls "$tls"
+  ik route add launchpad --wl "$APP" --host "$api_host" --tls "$api_tls"
   ik route add sockudo --wl "$PF" --host "$host" --path /rt --tls "$tls"
-  UI_URL=$PUBLIC_URL LP_URL=$PUBLIC_URL
+  UI_URL=$PUBLIC_URL LP_URL=$API_URL
 else
-  ik svc publish client-ui-next --wl "$APP" --auto --bind 127.0.0.1
+  ik svc publish dwigital-shell --wl "$APP" --auto --bind 127.0.0.1
   ik svc publish launchpad --wl "$APP" --auto --bind 127.0.0.1
   ik svc publish sockudo --wl "$PF" --auto --bind 127.0.0.1
   port_of() { $IKIT --no-input --wl "$1" svc list -o json | jq -r --arg s "$2" '.[] | select(.name == $s) | .publish[0].host'; }
-  UI_URL="http://localhost:$(port_of "$APP" client-ui-next)"
+  UI_URL="http://localhost:$(port_of "$APP" dwigital-shell)"
   LP_URL="http://localhost:$(port_of "$APP" launchpad)"
 fi
-ik svc set authrs --wl "$APP" "FRONTEND_URL=$UI_URL/ui/app1"
+ik svc set authrs --wl "$APP" "FRONTEND_URL=$UI_URL"
 ik svc set launchpad --wl "$APP" "PUBLIC_URL=$LP_URL"
-ik svc set client-ui-next --wl "$APP" \
-  "NEXT_PUBLIC_LAUNCHPAD_API_URL=$LP_URL/" \
-  "NEXT_PUBLIC_SIMULATION_API_BASE_URL=$LP_URL/proxy/simulation"
+ik svc set dwigital-shell --wl "$APP" "BASE_URL=$UI_URL"
 ik svc set sockudo --wl "$PF" "SOCKUDO_DEFAULT_APP_ALLOWED_ORIGINS=$UI_URL"
 
-# 6. Deploy: the platform first, since the app's references and seeds reach into it.
+# 6. Deploy: the platform first, so the gateway knows the apps' key before launchpad uses it.
 state="is up"
 if [ "$APPLY" = 1 ]; then
   ik apply --wl "$PF" -y
@@ -125,8 +182,9 @@ fi
 cat >&2 <<EOT
 
 $ENV_NAME $state: platform $PF, app $APP.
-  UI:        $UI_URL/ui/app1
+  UI:        $UI_URL
   Launchpad: $LP_URL
+  Gateway:   $GW_URL (the apps' key works only from ${APP_IPS:-$DOCKER_NETS})
   Admin:     tech@regere.ai; the password is authrs's SEED_ADMIN_PASSWORD in the org's
              secret store (see docs/read-org-secrets.md)
 EOT
